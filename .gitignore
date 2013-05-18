@@ -1,0 +1,38 @@
+# Object files
+*.o
+
+# Libraries
+*.lib
+*.a
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+
+# Build
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.rom
+*.eep
+
+# uVision * project
+*.uvgui.m
+*.dep
+bin/
+applet/
+
+# Common
+*.bak
+*.log
+*.kate-swp
