@@ -157,7 +157,7 @@
 #define MPU6050_D7 7
 
 // AUX_VDDIO Register
-#define MPU6050_AUX_VDDIO MPU6050_D7  // I2C high: 1=VDD, 0=VLOGIC
+#define MPU6050_AUX_VDDIO_VDD MPU6050_D7  // I2C high: 1=VDD, 0=VLOGIC
 
 // CONFIG Register
 // DLPF is Digital Low Pass Filter for both gyro and accelerometers.
@@ -561,7 +561,7 @@
 #define MPU6050_FIFO_RESET     MPU6050_D2
 #define MPU6050_I2C_IF_DIS     MPU6050_D4   // must be 0 for MPU-6050
 #define MPU6050_I2C_MST_EN     MPU6050_D5
-#define MPU6050_FIFO_EN        MPU6050_D6
+#define MPU6050_FIFO_EN_BIT    MPU6050_D6
 
 // PWR_MGMT_1 Register
 // These are the names for the bits.
@@ -665,7 +665,112 @@ typedef union accel_t_gyro_union
     int16_t y_gyro;
     int16_t z_gyro;
   } value;
+} accel_t_gyro_union_t;
+
+
+#ifdef F
+#undef F
+#endif
+#define F(a) a
+
+// moving average (boxcar) filter: saples of T-type, accumulator of TA-type, length of N
+template<class T, class TA, int N> class AverageBoxcarFilter
+{
+    T samples[N];
+    TA sum;
+    byte pos;
+    
+    public:
+   
+    AverageBoxcarFilter()
+    { 
+      pos=0;
+      sum=0;
+    }
+    
+    inline void next(T input)
+    {
+      // next input index
+      pos = (pos + 1) % N;
+      
+      // keep current sum of all samples so we do not have to recompute
+      sum -= samples[pos];
+      sum += input;
+      samples[pos] = input;      
+    }
+    
+    inline T curr()
+    {
+      return sum/N;      
+    }
 };
+
+
+int gxofs, gyofs, gzofs;
+
+#ifdef DOES_NOT_FIT_ON_THE_STACK
+// zero gyro through an averaging boxcar filter
+// just an example of the filter use (yes a bit over the top)
+void ZeroGyro()
+{
+  const int N = 256;
+  typedef AverageBoxcarFilter<int, long, N> GyroZeroFilter;
+  GyroZeroFilter gxf,gyf,gzf;
+  int error;
+  accel_t_gyro_union accel_t_gyro;
+    
+  for( int i = 0; i < N; i++ )
+  {
+    // Read all raw values (14 bytes at once), containing acceleration, temperature and gyro.
+    error = MPU6050_read (MPU6050_ACCEL_XOUT_H, (uint8_t *) &accel_t_gyro, sizeof(accel_t_gyro));
+
+    #define SWAP(x,y) { register uint8_t swap; swap = x; x = y; y = swap; }
+    SWAP (accel_t_gyro.reg.x_gyro_h, accel_t_gyro.reg.x_gyro_l);
+    SWAP (accel_t_gyro.reg.y_gyro_h, accel_t_gyro.reg.y_gyro_l);
+    SWAP (accel_t_gyro.reg.z_gyro_h, accel_t_gyro.reg.z_gyro_l);
+    #undef SWAP
+    
+    // adjust running average for gyro - ideally compute this at startup
+    gxf.next(accel_t_gyro.value.x_gyro);
+    gyf.next(accel_t_gyro.value.y_gyro);
+    gzf.next(accel_t_gyro.value.z_gyro);    
+  }
+  gxofs = gxf.curr();
+  gyofs = gyf.curr();
+  gzofs = gzf.curr();
+}
+#else
+
+void ZeroGyro()
+{
+  const int N = 256;
+  typedef AverageBoxcarFilter<int, long, N> GyroZeroFilter;
+  int error;
+  accel_t_gyro_union accel_t_gyro;
+  register long sx,sy,sz;
+  sx=sy=sz=0;
+  for(int i = 0;  i < 256; i++ )
+  {
+    // Read all raw values (14 bytes at once), containing acceleration, temperature and gyro.
+    error = MPU6050_read (MPU6050_ACCEL_XOUT_H, (uint8_t *) &accel_t_gyro, sizeof(accel_t_gyro));
+
+    #define SWAP(x,y) { register uint8_t swap; swap = x; x = y; y = swap; }
+    SWAP (accel_t_gyro.reg.x_gyro_h, accel_t_gyro.reg.x_gyro_l);
+    SWAP (accel_t_gyro.reg.y_gyro_h, accel_t_gyro.reg.y_gyro_l);
+    SWAP (accel_t_gyro.reg.z_gyro_h, accel_t_gyro.reg.z_gyro_l);
+    #undef SWAP
+    sx += accel_t_gyro.value.x_gyro;
+    sy += accel_t_gyro.value.y_gyro;
+    sz += accel_t_gyro.value.z_gyro;
+  }
+  gxofs = sx/N;
+  gyofs = sy/N;
+  gzofs = sz/N;
+}
+
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 
 void setup()
@@ -674,9 +779,9 @@ void setup()
   uint8_t c;
 
 
-  Serial.begin(9600);
+  Serial.begin(56700);
   Serial.println(F("InvenSense MPU-6050"));
-  Serial.println(F("June 2012"));
+  Serial.println(F("June 2012 - modified"));
 
   // Initialize the 'Wire' class for the I2C-bus.
   Wire.begin();
@@ -705,85 +810,86 @@ void setup()
   Serial.print(F(", error = "));
   Serial.println(error,DEC);
 
-
   // Clear the 'sleep' bit to start the sensor.
   MPU6050_write_reg (MPU6050_PWR_MGMT_1, 0);
+  
+  MPU6050_write_reg (MPU6050_CONFIG, MPU6050_DLPF_5HZ);  
+  
+  ZeroGyro();
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+unsigned long prevus=0;
 
 void loop()
 {
   int error;
-  double dT;
+
   accel_t_gyro_union accel_t_gyro;
-
-
-  Serial.println(F(""));
-  Serial.println(F("MPU-6050"));
-
-  // Read the raw values.
-  // Read 14 bytes at once, 
-  // containing acceleration, temperature and gyro.
-  // With the default settings of the MPU-6050,
-  // there is no filter enabled, and the values
-  // are not very stable.
+  
+  // Read the raw values (14 bytes at once), containing acceleration, temperature and gyro.
   error = MPU6050_read (MPU6050_ACCEL_XOUT_H, (uint8_t *) &accel_t_gyro, sizeof(accel_t_gyro));
-  Serial.print(F("Read accel, temp and gyro, error = "));
-  Serial.println(error,DEC);
+  if( error != 0 )
+  {
+    Serial.print(F("Read all, error = "));
+    Serial.println(error,DEC);
+  }
+  else
+  {
+    // Swap all high and low bytes to match ATMEL low endian.
+    #define SWAP(x,y) { register uint8_t swap; swap = x; x = y; y = swap; }
+    SWAP (accel_t_gyro.reg.x_accel_h, accel_t_gyro.reg.x_accel_l);
+    SWAP (accel_t_gyro.reg.y_accel_h, accel_t_gyro.reg.y_accel_l);
+    SWAP (accel_t_gyro.reg.z_accel_h, accel_t_gyro.reg.z_accel_l);
+    SWAP (accel_t_gyro.reg.t_h, accel_t_gyro.reg.t_l);
+    SWAP (accel_t_gyro.reg.x_gyro_h, accel_t_gyro.reg.x_gyro_l);
+    SWAP (accel_t_gyro.reg.y_gyro_h, accel_t_gyro.reg.y_gyro_l);
+    SWAP (accel_t_gyro.reg.z_gyro_h, accel_t_gyro.reg.z_gyro_l);  
+  
+    #if 1
+    // Print the raw acceleration values  
+    Serial.print(F("A: "));
+    Serial.print(accel_t_gyro.value.x_accel, DEC);
+    Serial.print(F(", "));
+    Serial.print(accel_t_gyro.value.y_accel, DEC);
+    Serial.print(F(", "));
+    Serial.print(accel_t_gyro.value.z_accel, DEC);
+  
+    // Print the raw gyro values.    
+  
+    Serial.print(F(" G: "));
+    Serial.print(accel_t_gyro.value.x_gyro - gxofs, DEC);
+    Serial.print(F(", "));
+    Serial.print(accel_t_gyro.value.y_gyro - gyofs, DEC);
+    Serial.print(F(", "));
+    Serial.print(accel_t_gyro.value.z_gyro - gzofs, DEC);
+  
+    // The temperature sensor is -40 to +85 degrees Celsius, for a16 bit signed int.
+    // 340 per degrees Celsius, -512 at 35 degrees
+    // At 0 degrees: -512 - (340 * 35) = -12412
+  
+    Serial.print(F(" T: "));
+    //float fT = ( (float) accel_t_gyro.value.temperature + 12412.0) / 340.0;
+    int temp_Cx10 = (accel_t_gyro.value.temperature/2 + 12412/2) / 17; // /2/17 ==/34
+    Serial.print(temp_Cx10, DEC);
+    Serial.print(F("x0.1C"));
+
+    unsigned long now = micros();
+    unsigned long delta = now >= prevus ? now - prevus : 0xFFFFFFFFUL - (prevus-now);
+    prevus = now;
+    Serial.print(" ");
+    Serial.print(delta);
+    Serial.print("us");
+    
+    Serial.println();
+
+    delay(100);        
+    #endif
+  }
 
 
-  // Swap all high and low bytes.
-  // After this, the registers values are swapped, 
-  // so the structure name like x_accel_l does no 
-  // longer contain the lower byte.
-  uint8_t swap;
-  #define SWAP(x,y) swap = x; x = y; y = swap
-
-  SWAP (accel_t_gyro.reg.x_accel_h, accel_t_gyro.reg.x_accel_l);
-  SWAP (accel_t_gyro.reg.y_accel_h, accel_t_gyro.reg.y_accel_l);
-  SWAP (accel_t_gyro.reg.z_accel_h, accel_t_gyro.reg.z_accel_l);
-  SWAP (accel_t_gyro.reg.t_h, accel_t_gyro.reg.t_l);
-  SWAP (accel_t_gyro.reg.x_gyro_h, accel_t_gyro.reg.x_gyro_l);
-  SWAP (accel_t_gyro.reg.y_gyro_h, accel_t_gyro.reg.y_gyro_l);
-  SWAP (accel_t_gyro.reg.z_gyro_h, accel_t_gyro.reg.z_gyro_l);
-
-
-  // Print the raw acceleration values
-
-  Serial.print(F("accel x,y,z: "));
-  Serial.print(accel_t_gyro.value.x_accel, DEC);
-  Serial.print(F(", "));
-  Serial.print(accel_t_gyro.value.y_accel, DEC);
-  Serial.print(F(", "));
-  Serial.print(accel_t_gyro.value.z_accel, DEC);
-  Serial.println(F(""));
-
-
-  // The temperature sensor is -40 to +85 degrees Celsius.
-  // It is a signed integer.
-  // According to the datasheet: 
-  //   340 per degrees Celsius, -512 at 35 degrees.
-  // At 0 degrees: -512 - (340 * 35) = -12412
-
-  Serial.print(F("temperature: "));
-  dT = ( (double) accel_t_gyro.value.temperature + 12412.0) / 340.0;
-  Serial.print(dT, 3);
-  Serial.print(F(" degrees Celsius"));
-  Serial.println(F(""));
-
-
-  // Print the raw gyro values.
-
-  Serial.print(F("gyro x,y,z : "));
-  Serial.print(accel_t_gyro.value.x_gyro, DEC);
-  Serial.print(F(", "));
-  Serial.print(accel_t_gyro.value.y_gyro, DEC);
-  Serial.print(F(", "));
-  Serial.print(accel_t_gyro.value.z_gyro, DEC);
-  Serial.print(F(", "));
-  Serial.println(F(""));
-
-  delay(1000);
+  //delay(100);
 }
 
 
@@ -802,7 +908,7 @@ void loop()
 //
 int MPU6050_read(int start, uint8_t *buffer, int size)
 {
-  int i, n, error;
+  int i, n;
 
   Wire.beginTransmission(MPU6050_I2C_ADDRESS);
   n = Wire.write(start);
