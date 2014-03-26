@@ -76,42 +76,7 @@ class Complementary2
     }
 };
 
-
-// Kalman filter
-float Kalman(float angle, float rate, float dt);
-
 ///////////////////////////////////////////////////////////////////////////////////
-
-// PID controller
-class PID
-{
-  public:
-  PID() :
-    last_error(0),
-    Kp(1), Ki(2), Kd(3)
-  { }
-
-  PID(float _Kp, float _Ki, float _Kd ) :
-    last_error(0),
-    Kp(_Kp), Ki(_Ki), Kd(_Kd)
-  { }
-
-  float Kp;
-  float Ki;
-  float Kd;
-
-  float Update(float error)
-  {
-    float resp = Kp *  error +
-                 Ki * (error + last_error) +
-                 Kd * (error - last_error);
-    last_error = error;
-    return resp;
-  }
-private:
-  float last_error;
-};
-
 
 class Kalman
 {
@@ -160,3 +125,44 @@ class Kalman
       return x_angle;
     }
 };
+
+///////////////////////////////////////////////////////////////////////////////////
+
+// PID controller
+class PID
+{
+  public:
+  PID() :
+    last_error(0),
+    Kp(1), Ki(2), Kd(3)
+  { }
+
+  PID(float _Kp, float _Ki, float _Kd ) :
+    last_error(0),
+    Kp(_Kp), Ki(_Ki), Kd(_Kd)
+  { }
+
+  float Kp;
+  float Ki;
+  float Kd;
+
+  float Update(float error)
+  {
+    #if 0
+    float resp = Kp *  error +
+                 Ki * (error + last_error) +
+                 Kd * (error - last_error);
+    #else             
+    float resp = 0;
+    if( Kp != 0 ) resp += Kp *  error;
+    if( Ki != 0 ) resp += Ki * (error + last_error);
+    if( Kd != 0 ) resp += Kd * (error - last_error);
+    #endif
+    
+    last_error = error;
+    return resp;
+  }
+private:
+  float last_error;
+};
+

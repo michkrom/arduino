@@ -119,7 +119,7 @@ class PID
     Kp(1), Ki(2), Kd(3)
   { }
 
-  PID(float _Kp, float _Ki, float _Kd ) :
+  PID(float _Kp, float _Ki, float _Kd) :
     last_error(0),
     Kp(_Kp), Ki(_Ki), Kd(_Kd)
   { }
@@ -130,9 +130,10 @@ class PID
 
   float Update(float error)
   {
-    float resp = Kp *  error +
-                 Ki * (error + last_error) +
-                 Kd * (error - last_error);
+    float resp = 0;
+    if( Kp != 0 ) resp += Kp *  error;
+    if( Ki != 0 ) resp += Ki * (error + last_error);
+    if( Kd != 0 ) resp += Kd * (error - last_error);
     last_error = error;
     return resp;
   }

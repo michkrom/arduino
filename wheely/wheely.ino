@@ -66,7 +66,7 @@ float ComputeAngle(float x, float y, float z)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// printmask
+// output mask
 enum {
   PM_ANR = 1,
   PM_ANG = 2,
@@ -83,11 +83,11 @@ enum {
 unsigned PM = 0;
 
 PID PosPID(0.3,0.3,0.8);
+PID HeadingPID(1,1,2);
 Complementary filter(0.98);
 
-float KM = 55;   // motors gain
-float KB = 0.999; // self balancing integration ratio
-float KH = 0.5;   // heading filter integration ratio
+float KM = 55;    // motors gain
+float KB = 0.999; // self adjusting vertical point integration ratio
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -106,7 +106,7 @@ void CheckInput()
     case 'c': filter.K= serVal; break;
     case 'b': KB = serVal; break;
     case 'm': KM = serVal; break;
-    case 'o': PM = (unsigned) serVal; break;
+    case 'x': PM = (unsigned) serVal; break;
     case 0 : 
       {
         Serial.print(F("Kp="));
@@ -128,12 +128,12 @@ void CheckInput()
         Serial.print(KB,4);
         Serial.print(' ');
         Serial.print(F("KH="));
-        Serial.print(KH);
+        Serial.print(HeadingPID.Kd);
         Serial.println();
       }
       break;
    default:
-    Serial.println(F("[param][-][0..9]*[.][0..9]*<cr> or [pidc]<cr> - where param=pidchmo are PID Compl etc. coeffs"));
+    Serial.println(F("[param][-][0..9]*[.][0..9]*<cr> or [pidc]<cr> - where param=pidchmo? are PID Compl etc. coeffs; ? sets output mask"));
     break;
     }
     // clear cmd so we do not repeat
@@ -160,61 +160,69 @@ void loop()
     CheckInput();
     return;
   }
+  
   // <---- it's time to adjust ---->
   prevus = now;
 
   // get imu readings
   accel_t_gyro_t accel_t_gyro;
   // Read the raw values (14 bytes at once), containing acceleration, temperature and gyro.
-  int error = MPU6050_read_all(&accel_t_gyro);
-  if( error != 0 )
+  do
   {
+    int error = MPU6050_read_all(&accel_t_gyro);
+    if( error == 0 ) break;
     Serial.print(F("Read error = "));
     Serial.println(error,DEC);
   }
-  else
+  while(1);
+  
+  // adjust position
   {
-    float angle = ComputeAngle( accel_t_gyro.x_accel, accel_t_gyro.y_accel, accel_t_gyro.z_accel );
+    
+    float angle = ComputeAngle(accel_t_gyro.x_accel, accel_t_gyro.y_accel, accel_t_gyro.z_accel);
     // rotation around x axis is the rate of y axis change
     // float rateDeg = 2000.0*accel_t_gyro.x_gyro/0x7FFF;
-    //float rate = (500.0*M_PI)*(accel_t_gyro.x_gyro-gxofs)/(0x7FFF*180.0);
+    // float rate = (500.0*M_PI)*(accel_t_gyro.x_gyro-gxofs)/(0x7FFF*180.0);
     const float GG = (500.0f/0x7fff)*M_PI/180.0f;
     float rate = float(accel_t_gyro.x_gyro-gxofs)*GG;
     
 
-    // estimation alg
+    // angle estimation filter
     float dt = delta*1E-6;
-    float a = filter.Update(angle,rate,dt);
-    //float a = Complementary2(angle,rate,dt);
-    //float a = Kalman(angle,rate,dt);
+    float a = filter.Update(angle, rate, dt);
 
-    // current position error (radians)
-    float error = a - pos;
+    // current angle error (radians)
+    float error = a + pos;
 
-    float correction = PosPID.Update( -error );
+    // correction response
+    float correction = - PosPID.Update( error );
 
     // integrate (low-pass) correction actuator to sense "true" stable position
+    // in true-vertical position the mean correction should be zero
     pos = KB*pos + (1-KB)*correction;
-    pos = saturate( pos, -0.1f, +0.1f );
+    // limit the adjustment in case we went haywire
+    pos = saturate( pos, -0.4f, +0.4f );
 
     // actuation (motors) driver
     float motors = KM*KM * correction;
-    // attemp to linearize the drive a bit (no feedback PWM --> Voltage --> RPM but not torque
+    // attemp to linearize the drive a bit (no feedback) PWM --> Voltage --> RPM but not torque
     //float sign = motors > 0 ? 1 : -1;
     //motors = sqrt(abs(motors)) * sign;
     
     // try to stabilize heading
     // yaw rate low pass filter
-    static float dir = 0;
-    dir = KH*dir + (1-KH)*accel_t_gyro.y_gyro*dt;            
+    //static float dir = 0;
+    // dir = KH*dir + (1-KH)*accel_t_gyro.y_gyro*dt;
+    // float headcorr = saturate((dir+(lastdir-dir)*2),KHG);
+    // static float lastdir = 0;
+    // lastdir = dir;
+
     // PD controller for heading
-    static float lastdir = 0;
-    float headcorr = saturate((dir+(lastdir-dir)*2),50.0f);
-    lastdir = dir;
+    float headcorr = 0; //HeadingPID.Update((float)accel_t_gyro.y_gyro*0.001);
     
     int motorR, motorL;    
-    motorR = motors + (1-headcorr);
-    motorL = motors - (1+headcorr);
+    motorR = motors + headcorr;
+    motorL = motors - headcorr;
 
     // safet" we failed if a>45deg -> stop motors
     if( angle > M_PI/4 || angle < -M_PI/4 ) motorL=motorR=0;
