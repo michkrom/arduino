@@ -5,13 +5,13 @@
 // rate = gyro rate
 // dt = delta time [s]
 
-float KC=0.075;
+float KC=0.98;
 
 float Complementary(float angle, float rate, float dt)
 {
   static float angleC = 0;
-  float k=KC/(KC+dt);
-  angleC = k * (angleC + rate * dt) + (1 - k) * angle;
+  float k=KC;///(KC+dt);
+  angleC = k * (angleC  + rate * dt) + (1 - k) * angle;
   return angleC;
 }
 
@@ -87,8 +87,8 @@ float Kalman(float newAngle, float newRate, float dt)
 // PID controller
 
 float Kp = 1;
-float Ki = 1;
-float Kd = 6;
+float Ki = 2;
+float Kd = 3;
 
 float CalcPID(float error)
 {
