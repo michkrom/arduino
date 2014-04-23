@@ -47,6 +47,8 @@ public:
 // 2nd order complementary filter
 class Complementary2
 {
+public:
+
     // filter gain
     float K;
     // K^2

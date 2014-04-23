@@ -36,11 +36,11 @@ FreeIMU::FreeIMU() {
   #elif HAS_BMA180()
     acc = BMA180();
   #endif
-  
+
   #if HAS_HMC5883L()
     magn = HMC58X3();
   #endif
-  
+
   #if HAS_ITG3200()
     gyro = ITG3200();
   #elif HAS_MPU6050()
@@ -48,11 +48,11 @@ FreeIMU::FreeIMU() {
   #elif HAS_MPU6000()
     accgyro = MPU60X0(); // SPI for Arduimu v3
   #endif
-    
+
   #if HAS_MS5611()
     baro = MS561101BA();
   #endif
-  
+
   // initialize quaternion
   q0 = 1.0f;
   q1 = 0.0f;
@@ -66,7 +66,7 @@ FreeIMU::FreeIMU() {
   integralFBx = 0.0f,  integralFBy = 0.0f, integralFBz = 0.0f;
   lastUpdate = 0;
   now = 0;
-  
+
   #ifndef CALIBRATION_H
   // initialize scale factors to neutral values
   acc_scale_x = 1;
@@ -118,7 +118,7 @@ void FreeIMU::init(int acc_addr, int gyro_addr, bool fastmode) {
 void FreeIMU::init(int accgyro_addr, bool fastmode) {
 #endif
   delay(5);
-  
+
   // disable internal pullups of the ATMEGA which Wire enable by default
   #if defined(__AVR_ATmega168__) || defined(__AVR_ATmega8__) || defined(__AVR_ATmega328P__)
     // deactivate internal pull-ups for twi
@@ -131,11 +131,11 @@ void FreeIMU::init(int accgyro_addr, bool fastmode) {
     cbi(PORTD, 0);
     cbi(PORTD, 1);
   #endif
-  
+
   if(fastmode) { // switch to 400KHz I2C - eheheh
     TWBR = ((F_CPU / 400000L) - 16) / 2; // see twi_init in Wire/utility/twi.c
   }
-  
+
   #if HAS_ADXL345()
     // init ADXL345
     acc.init(acc_addr);
@@ -158,8 +158,8 @@ void FreeIMU::init(int accgyro_addr, bool fastmode) {
   // calibrate the ITG3200
   gyro.zeroCalibrate(128,5);
   #endif
-  
-  
+
+
   #if HAS_MPU6050()
   accgyro = MPU60X0(false, accgyro_addr);
   accgyro.initialize();
@@ -168,15 +168,15 @@ void FreeIMU::init(int accgyro_addr, bool fastmode) {
   accgyro.setFullScaleGyroRange(MPU60X0_GYRO_FS_2000);
   delay(5);
   #endif
-  
+
   #if HAS_MPU6000()
   accgyro = MPU60X0(true, accgyro_addr);
   accgyro.initialize();
   accgyro.setFullScaleGyroRange(MPU60X0_GYRO_FS_2000);
   delay(5);
-  #endif 
-  
-  
+  #endif
+
+
   #if HAS_HMC5883L()
   // init HMC5843
   magn.init(false); // Don't set mode yet, we'll do that later on.
@@ -187,15 +187,15 @@ void FreeIMU::init(int accgyro_addr, bool fastmode) {
   delay(10);
   magn.setDOR(B110);
   #endif
-  
-  
+
+
   #if HAS_MS5611()
     baro.init(FIMU_BARO_ADDR);
   #endif
-    
+
   // zero gyro
   zeroGyro();
-  
+
   #ifndef CALIBRATION_H
   // load calibration from eeprom
   calLoad();
@@ -216,19 +216,19 @@ void eeprom_read_var(uint8_t size, byte * var) {
 void FreeIMU::calLoad() {
   if(EEPROM.read(FREEIMU_EEPROM_BASE) == FREEIMU_EEPROM_SIGNATURE) { // check if signature is ok so we have good data
     location = FREEIMU_EEPROM_BASE + 1; // reset location
-    
+
     eeprom_read_var(sizeof(acc_off_x), (byte *) &acc_off_x);
     eeprom_read_var(sizeof(acc_off_y), (byte *) &acc_off_y);
     eeprom_read_var(sizeof(acc_off_z), (byte *) &acc_off_z);
-    
+
     eeprom_read_var(sizeof(magn_off_x), (byte *) &magn_off_x);
     eeprom_read_var(sizeof(magn_off_y), (byte *) &magn_off_y);
     eeprom_read_var(sizeof(magn_off_z), (byte *) &magn_off_z);
-    
+
     eeprom_read_var(sizeof(acc_scale_x), (byte *) &acc_scale_x);
     eeprom_read_var(sizeof(acc_scale_y), (byte *) &acc_scale_y);
     eeprom_read_var(sizeof(acc_scale_z), (byte *) &acc_scale_z);
-    
+
     eeprom_read_var(sizeof(magn_scale_x), (byte *) &magn_scale_x);
     eeprom_read_var(sizeof(magn_scale_y), (byte *) &magn_scale_y);
     eeprom_read_var(sizeof(magn_scale_z), (byte *) &magn_scale_z);
@@ -264,23 +264,27 @@ void FreeIMU::getRawValues(int * raw_values) {
   #if HAS_HMC5883L()
     magn.getValues(&raw_values[6], &raw_values[7], &raw_values[8]);
   #endif
-  
+
   #if HAS_MS5611()
     int temp, press;
-    
+
     //TODO: possible loss of precision
     temp = baro.rawTemperature(MS561101BA_OSR_4096);
     raw_values[9] = temp;
     press = baro.rawPressure(MS561101BA_OSR_4096);
     raw_values[10] = press;
   # endif
+
+  #ifdef SENSOR_ORIENTATION_CORRECTION
+  SENSOR_ORIENTATION_CORRECTION(raw_values)
+  #endif
 }
 
 
 /**
  * Populates values with calibrated readings from the sensors
 */
-void FreeIMU::getValues(float * values) {  
+void FreeIMU::getValues(float * values) {
   #if HAS_ITG3200()
     int accval[3];
     acc.readAccel(&accval[0], &accval[1], &accval[2]);
@@ -291,7 +295,7 @@ void FreeIMU::getValues(float * values) {
   #else // MPU6050
     int16_t accgyroval[6];
     accgyro.getMotion6(&accgyroval[0], &accgyroval[1], &accgyroval[2], &accgyroval[3], &accgyroval[4], &accgyroval[5]);
-    
+
     // remove offsets from the gyroscope
     accgyroval[3] = accgyroval[3] - gyro_off_x;
     accgyroval[4] = accgyroval[4] - gyro_off_y;
@@ -306,18 +310,18 @@ void FreeIMU::getValues(float * values) {
       }
     }
   #endif
-  
-  
+
+
   #warning Accelerometer calibration active: have you calibrated your device?
   // remove offsets and scale accelerometer (calibration)
   values[0] = (values[0] - acc_off_x) / acc_scale_x;
   values[1] = (values[1] - acc_off_y) / acc_scale_y;
   values[2] = (values[2] - acc_off_z) / acc_scale_z;
-  
-  
+
+
   #if HAS_HMC5883L()
     magn.getValues(&values[6]);
-    // calibration 
+    // calibration
     #warning Magnetometer calibration active: have you calibrated your device?
     values[6] = (values[6] - magn_off_x) / magn_scale_x;
     values[7] = (values[7] - magn_off_y) / magn_scale_y;
@@ -333,14 +337,14 @@ void FreeIMU::zeroGyro() {
   const int totSamples = 3;
   int raw[11];
   float tmpOffsets[] = {0,0,0};
-  
+
   for (int i = 0; i < totSamples; i++){
     getRawValues(raw);
     tmpOffsets[0] += raw[3];
     tmpOffsets[1] += raw[4];
     tmpOffsets[2] += raw[5];
   }
-  
+
   gyro_off_x = tmpOffsets[0] / totSamples;
   gyro_off_y = tmpOffsets[1] / totSamples;
   gyro_off_z = tmpOffsets[2] / totSamples;
@@ -352,7 +356,7 @@ void FreeIMU::zeroGyro() {
  * compensation algorithms from Sebastian Madgwick's filter which eliminates the need for a reference
  * direction of flux (bx bz) to be predefined and limits the effect of magnetic distortions to yaw
  * axis only.
- * 
+ *
  * @see: http://www.x-io.co.uk/node/8#open_source_ahrs_and_imu_algorithms
 */
 #if IS_9DOM()
@@ -376,30 +380,30 @@ void  FreeIMU::AHRSupdate(float gx, float gy, float gz, float ax, float ay, floa
   q2q2 = q2 * q2;
   q2q3 = q2 * q3;
   q3q3 = q3 * q3;
-  
+
   #if IS_9DOM()
   // Use magnetometer measurement only when valid (avoids NaN in magnetometer normalisation)
   if((mx != 0.0f) && (my != 0.0f) && (mz != 0.0f)) {
     float hx, hy, bx, bz;
     float halfwx, halfwy, halfwz;
-    
+
     // Normalise magnetometer measurement
     recipNorm = invSqrt(mx * mx + my * my + mz * mz);
     mx *= recipNorm;
     my *= recipNorm;
     mz *= recipNorm;
-    
+
     // Reference direction of Earth's magnetic field
     hx = 2.0f * (mx * (0.5f - q2q2 - q3q3) + my * (q1q2 - q0q3) + mz * (q1q3 + q0q2));
     hy = 2.0f * (mx * (q1q2 + q0q3) + my * (0.5f - q1q1 - q3q3) + mz * (q2q3 - q0q1));
     bx = sqrt(hx * hx + hy * hy);
     bz = 2.0f * (mx * (q1q3 - q0q2) + my * (q2q3 + q0q1) + mz * (0.5f - q1q1 - q2q2));
-    
+
     // Estimated direction of magnetic field
     halfwx = bx * (0.5f - q2q2 - q3q3) + bz * (q1q3 - q0q2);
     halfwy = bx * (q1q2 - q0q3) + bz * (q0q1 + q2q3);
     halfwz = bx * (q0q2 + q1q3) + bz * (0.5f - q1q1 - q2q2);
-    
+
     // Error is sum of cross product between estimated direction and measured direction of field vectors
     halfex = (my * halfwz - mz * halfwy);
     halfey = (mz * halfwx - mx * halfwz);
@@ -410,18 +414,18 @@ void  FreeIMU::AHRSupdate(float gx, float gy, float gz, float ax, float ay, floa
   // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
   if((ax != 0.0f) && (ay != 0.0f) && (az != 0.0f)) {
     float halfvx, halfvy, halfvz;
-    
+
     // Normalise accelerometer measurement
     recipNorm = invSqrt(ax * ax + ay * ay + az * az);
     ax *= recipNorm;
     ay *= recipNorm;
     az *= recipNorm;
-    
+
     // Estimated direction of gravity
     halfvx = q1q3 - q0q2;
     halfvy = q0q1 + q2q3;
     halfvz = q0q0 - 0.5f + q3q3;
-  
+
     // Error is sum of cross product between estimated direction and measured direction of field vectors
     halfex += (ay * halfvz - az * halfvy);
     halfey += (az * halfvx - ax * halfvz);
@@ -450,7 +454,7 @@ void  FreeIMU::AHRSupdate(float gx, float gy, float gz, float ax, float ay, floa
     gy += twoKp * halfey;
     gz += twoKp * halfez;
   }
-  
+
   // Integrate rate of change of quaternion
   gx *= (0.5f * (1.0f / sampleFreq));   // pre-multiply common factors
   gy *= (0.5f * (1.0f / sampleFreq));
@@ -462,7 +466,7 @@ void  FreeIMU::AHRSupdate(float gx, float gy, float gz, float ax, float ay, floa
   q1 += (qa * gx + qc * gz - q3 * gy);
   q2 += (qa * gy - qb * gz + q3 * gx);
   q3 += (qa * gz + qb * gy - qc * gx);
-  
+
   // Normalise quaternion
   recipNorm = invSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
   q0 *= recipNorm;
@@ -474,13 +478,13 @@ void  FreeIMU::AHRSupdate(float gx, float gy, float gz, float ax, float ay, floa
 
 /**
  * Populates array q with a quaternion representing the IMU orientation with respect to the Earth
- * 
+ *
  * @param q the quaternion to populate
 */
 void FreeIMU::getQ(float * q) {
   float val[9];
   getValues(val);
-  
+
   DEBUG_PRINT(val[3] * M_PI/180);
   DEBUG_PRINT(val[4] * M_PI/180);
   DEBUG_PRINT(val[5] * M_PI/180);
@@ -490,7 +494,7 @@ void FreeIMU::getQ(float * q) {
   DEBUG_PRINT(val[6]);
   DEBUG_PRINT(val[7]);
   DEBUG_PRINT(val[8]);
-  
+
   now = micros();
   sampleFreq = 1.0 / ((now - lastUpdate) / 1000000.0);
   lastUpdate = now;
@@ -506,7 +510,7 @@ void FreeIMU::getQ(float * q) {
   #else
     AHRSupdate(val[3] * M_PI/180, val[4] * M_PI/180, val[5] * M_PI/180, val[0], val[1], val[2]);
   #endif
-  
+
   q[0] = q0;
   q[1] = q1;
   q[2] = q2;
@@ -542,28 +546,28 @@ float FreeIMU::getBaroAlt() {
 */
 void FreeIMU::gravityCompensateAcc(float * acc, float * q) {
   float g[3];
-  
+
   // get expected direction of gravity in the sensor frame
   g[0] = 2 * (q[1] * q[3] - q[0] * q[2]);
   g[1] = 2 * (q[0] * q[1] + q[2] * q[3]);
   g[2] = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
-  
+
   // compensate accelerometer readings with the expected direction of gravity
   acc[0] = acc[0] - g[0];
   acc[1] = acc[1] - g[1];
   acc[2] = acc[2] - g[2];
 }
-// 
-// 
+//
+//
 // // complementary filter from MultiWii project v1.9
-// 
+//
 // #define UPDATE_INTERVAL 25000    // 40hz update rate (20hz LPF on acc)
 // #define INIT_DELAY      4000000  // 4 sec initialization delay
-// #define Kp1 0.55f                // PI observer velocity gain 
+// #define Kp1 0.55f                // PI observer velocity gain
 // #define Kp2 1.0f                 // PI observer position gain
 // #define Ki  0.001f               // PI observer integral gain (bias cancellation)
 // #define dt  (UPDATE_INTERVAL / 1000000.0f)
-// 
+//
 // /**
 // * Returns an altitude estimate from baromether fused with accelerometer readings
 // */
@@ -578,13 +582,13 @@ void FreeIMU::gravityCompensateAcc(float * acc, float * q) {
 //   static int32_t  BaroAlt;
 //   static int32_t  EstVelocity;
 //   static int32_t  EstAlt;
-//   
+//
 //   long currentTime = micros();
-//   
+//
 //   if (currentTime < deadLine) return BaroAlt;
-//   deadLine = currentTime + UPDATE_INTERVAL; 
+//   deadLine = currentTime + UPDATE_INTERVAL;
 //   // Soft start
-// 
+//
 //   if (!inited) {
 //     inited = 1;
 //     EstAlt = getBaroAlt();
@@ -602,22 +606,22 @@ void FreeIMU::gravityCompensateAcc(float * acc, float * q) {
 //   #else
 //     InstAcc = AltErrorI / 1000;
 //   #endif
-//   
+//
 //   // Integrators
 //   Delta = InstAcc * dt + (Kp1 * dt) * AltError;
 //   EstAlt += (EstVelocity/5 + Delta) * (dt / 2) + (Kp2 * dt) * AltError;
 //   EstVelocity += Delta*10;
-//   
-//   
+//
+//
 //   vmath::quat<float> ciao = vmath::quat<float>(0.0, 0.1, 0.2, 0.3);
 //   vmath::quat<float> ciao2;
-//   
+//
 //   ciao = ciao * ciao2;
-//   
-//   
+//
+//
 //   Serial.print(":::");
 //   Serial.println(ciao.w);
-//   
+//
 //   return EstAlt;
 // }
 
@@ -626,9 +630,9 @@ void FreeIMU::gravityCompensateAcc(float * acc, float * q) {
 
 /**
  * Returns the Euler angles in radians defined in the Aerospace sequence.
- * See Sebastian O.H. Madwick report "An efficient orientation filter for 
+ * See Sebastian O.H. Madwick report "An efficient orientation filter for
  * inertial and intertial/magnetic sensor arrays" Chapter 2 Quaternion representation
- * 
+ *
  * @param angles three floats array which will be populated by the Euler angles in radians
 */
 void FreeIMU::getEulerRad(float * angles) {
@@ -639,12 +643,26 @@ void FreeIMU::getEulerRad(float * angles) {
   angles[2] = atan2(2 * q[2] * q[3] - 2 * q[0] * q[1], 2 * q[0] * q[0] + 2 * q[3] * q[3] - 1); // phi
 }
 
+/**
+ * Returns the Euler angles in radians defined in the Aerospace sequence.
+ * See Sebastian O.H. Madwick report "An efficient orientation filter for
+ * inertial and intertial/magnetic sensor arrays" Chapter 2 Quaternion representation
+ *
+ * @param q quaternion
+ * @param angles out three floats array which will be populated by the Euler angles in radians
+*/
+void FreeIMU::getEulerRad(const float * const q, float * angles) {
+  angles[0] = atan2(2 * q[1] * q[2] - 2 * q[0] * q[3], 2 * q[0]*q[0] + 2 * q[1] * q[1] - 1); // psi
+  angles[1] = -asin(2 * q[1] * q[3] + 2 * q[0] * q[2]); // theta
+  angles[2] = atan2(2 * q[2] * q[3] - 2 * q[0] * q[1], 2 * q[0] * q[0] + 2 * q[3] * q[3] - 1); // phi
+}
+
 
 /**
  * Returns the Euler angles in degrees defined with the Aerospace sequence.
- * See Sebastian O.H. Madwick report "An efficient orientation filter for 
+ * See Sebastian O.H. Madwick report "An efficient orientation filter for
  * inertial and intertial/magnetic sensor arrays" Chapter 2 Quaternion representation
- * 
+ *
  * @param angles three floats array which will be populated by the Euler angles in degrees
 */
 void FreeIMU::getEuler(float * angles) {
@@ -657,21 +675,21 @@ void FreeIMU::getEuler(float * angles) {
  * Returns the yaw pitch and roll angles, respectively defined as the angles in radians between
  * the Earth North and the IMU X axis (yaw), the Earth ground plane and the IMU X axis (pitch)
  * and the Earth ground plane and the IMU Y axis.
- * 
+ *
  * @note This is not an Euler representation: the rotations aren't consecutive rotations but only
  * angles from Earth and the IMU. For Euler representation Yaw, Pitch and Roll see FreeIMU::getEuler
- * 
+ *
  * @param ypr three floats array which will be populated by Yaw, Pitch and Roll angles in radians
 */
 void FreeIMU::getYawPitchRollRad(float * ypr) {
   float q[4]; // quaternion
   float gx, gy, gz; // estimated gravity direction
   getQ(q);
-  
+
   gx = 2 * (q[1]*q[3] - q[0]*q[2]);
   gy = 2 * (q[0]*q[1] + q[2]*q[3]);
   gz = q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3];
-  
+
   ypr[0] = atan2(2 * q[1] * q[2] - 2 * q[0] * q[3], 2 * q[0]*q[0] + 2 * q[1] * q[1] - 1);
   ypr[1] = atan(gx / sqrt(gy*gy + gz*gz));
   ypr[2] = atan(gy / sqrt(gx*gx + gz*gz));
@@ -682,10 +700,10 @@ void FreeIMU::getYawPitchRollRad(float * ypr) {
  * Returns the yaw pitch and roll angles, respectively defined as the angles in degrees between
  * the Earth North and the IMU X axis (yaw), the Earth ground plane and the IMU X axis (pitch)
  * and the Earth ground plane and the IMU Y axis.
- * 
+ *
  * @note This is not an Euler representation: the rotations aren't consecutive rotations but only
  * angles from Earth and the IMU. For Euler representation Yaw, Pitch and Roll see FreeIMU::getEuler
- * 
+ *
  * @param ypr three floats array which will be populated by Yaw, Pitch and Roll angles in degrees
 */
 void FreeIMU::getYawPitchRoll(float * ypr) {

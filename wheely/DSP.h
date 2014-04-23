@@ -22,6 +22,7 @@ class Complementary
 {
 public:
 
+    // tau = dt*K/(1-K) K=tau/(tau+dt)
     float K;
     float outAngle;
 
@@ -30,11 +31,10 @@ public:
     // angle - angle measured with the accelerometer
     // rate - angle measured using the gyro
     // dt - delta time [s]
-    float Update(float angle, float rate, float dt)
+    inline float Update(float angle, float rate, float dt)
     {
-      float k=K;
-      //float k = K/(K+dt);
-      outAngle = k * (outAngle  + rate * dt) + (1 - k) * angle;
+      outAngle = K * (outAngle  + rate * dt) 
+               + (1 - K) * angle;
       return outAngle;
     }
 
