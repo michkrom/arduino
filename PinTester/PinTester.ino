@@ -15,17 +15,60 @@
  * (note all other characters ignored so dx1x3x x1x\r would be the same as d13 1\r)
  */
 
+
 void setup()
 {
   // begin the serial communication
   Serial.begin(9600);
-  Serial.println("PinTester ready!");
+  Serial.println("PinTester ready.");
+  Serial.println("dN V sets digital pin N to value V");
+  Serial.println("dN V sets analog pin N to value V");
+  Serial.println("command without V reads the pin state");
 }
 
+
 byte state = 0; // 0 waiting for cmd; 1 waiting for space; 2 wating for endln
-byte cmd = 0;
+enum class PINTYPE {
+  ANALOG,
+  DIGITAL
+} pinType = PINTYPE::ANALOG;
+enum class OPERATION {
+  READ,
+  WRITE
+} oper = OPERATION::READ;
 byte pin;
 byte val;
+bool repeat = false;
+
+
+void execute()
+{
+  if(oper == OPERATION::READ )  
+  {
+    Serial.print(pin);
+    Serial.print("->");
+    if( pinType == PINTYPE::DIGITAL ) {
+      Serial.print(digitalRead(pin));
+    }
+    else {
+      Serial.print(analogRead(pin));
+    }
+  }
+  else
+  {
+    Serial.print(pin);
+    Serial.print("<-");
+    Serial.print(val);
+    if( pinType == PINTYPE::DIGITAL ) {
+      pinMode(pin,OUTPUT);
+      digitalWrite(pin,val);
+    }
+    else
+      analogWrite(pin,val);
+  }
+  Serial.println(".\r\n");  
+}
+
 
 void loop()
 {
@@ -37,10 +80,16 @@ void loop()
       case 0:
         if( in == 'd' || in == 'a' ) 
         {
-          cmd = in;
+          pinType = in == 'd' ? PINTYPE::DIGITAL : PINTYPE::ANALOG;
+          oper = OPERATION::READ;
           pin = 0;
           val = 0;
+          repeat = false;
           state++;
+        } 
+        else if( in == 'r' )
+        {
+          repeat = true;
         }
         break;
       case 1:
@@ -52,6 +101,7 @@ void loop()
         else if( in == ' ' )
         {
           state++;
+          oper = OPERATION::WRITE;
         }
         break;
       case 2:
@@ -62,33 +112,13 @@ void loop()
         }
         break;
     }
-    // execute command on CR
-    if( in == '\r' )
+    // execute command on CR or NL
+    if( in == '\r' || in =='\n' )
     {
       Serial.println("\r\n");
-      if( state == 1 )
-      {
-        Serial.print(pin);
-        Serial.print("->");
-        if( cmd == 'd' )
-          Serial.print(digitalRead(pin));
-        else if( cmd == 'a' )
-          Serial.print(analogRead(pin));
-
-      }
-      else if( state == 2 )
-      {
-        Serial.print(pin);
-        Serial.print("<-");
-        Serial.print(val);
-        if( cmd == 'd' )
-          digitalWrite(pin,val);
-        else if( cmd == 'a' )
-          analogWrite(pin,val);
-      }
-      Serial.println(".\r\n");
+      execute();
       state = 0;
     }
   }
+  if(repeat) execute();
 }
-
