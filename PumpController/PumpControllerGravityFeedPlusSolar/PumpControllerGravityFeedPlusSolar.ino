@@ -5,16 +5,18 @@
 
 // A0 is water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
 
-// D 4/5/6/7 are relays (zero-active): D7 is solar panel D4 is pump
+// D 4/5/6/7 are relays (zero-active): D4 is pump (active low)
+// D8 is solar panel via MOSFET solid state relay (active high)
 
 #define LED_PIN 13
 #define PUMP_PIN 4
-#define SOLAR_PIN 5
+#define SOLAR_PIN 8
+#define BEEP_PIN 11
 
 // sensor readout to start pumping in dac counts
 
 // water sense treshold (lawer reading means water is present)
-int treshHold = 550;
+int treshHold = 650;
 
 int readSensor()
 {
@@ -56,36 +58,25 @@ long readVcc()
   return result; 
 }
 
-
-void setup()
-{
-  // begin the serial communication
-  Serial.begin(9600);
-  Serial.println("Pump controller.");
-  Serial.print("TreshHold = ");Serial.println(treshHold);
-  digitalWrite(PUMP_PIN, 1);
-  pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(SOLAR_PIN, 1);
-  pinMode(SOLAR_PIN, OUTPUT);
-  for(auto n = 0; n < 5; ++n) {
-    delay(1000UL);
-    Serial.print('.');
-  }
-  Serial.println("Ready!");
-}
-
-
 void sleep1s()
 {
   digitalWrite(LED_PIN,1);
-  delay(100UL);
+  delay(500UL);
   digitalWrite(LED_PIN,0);
-  delay(900UL);
+  delay(500UL);
+}
+
+void beep(int ms=100)
+{
+  digitalWrite(BEEP_PIN,1);
+  delay(ms);
+  digitalWrite(BEEP_PIN,0);      
 }
 
 
 bool pumping = false;
 bool charging = false;
+bool powerok = false;
 int timer = 0;
 
 const unsigned PumpOnTime = 30;
@@ -95,6 +86,27 @@ const unsigned SamplingTime = 10;
 void setTimer(int seconds)
 {
   timer=seconds;
+}
+
+void setup()
+{
+  // begin the serial communication
+  Serial.begin(9600);
+  Serial.println("Pump controller.");
+  Serial.print("TreshHold = ");Serial.println(treshHold);
+  digitalWrite(PUMP_PIN, 1);
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(BEEP_PIN, 0);
+  pinMode(BEEP_PIN, OUTPUT);
+  digitalWrite(SOLAR_PIN, 0);
+  pinMode(SOLAR_PIN, OUTPUT);
+  for(auto n = 0; n < 5; ++n) {
+    beep(50);
+    delay(1000UL);
+    Serial.print('.');
+  }
+  beep(200);
+  Serial.println("Ready!");
 }
 
 
@@ -108,8 +120,29 @@ void loop()
     // sensor forcefully grounded -> reset the timer
     setTimer(0);
     digitalWrite(LED_PIN,1);
-    sleep1s();
+    beep(1000);
   }
+  if( battery_mV < 13000 )
+  {
+    charging = true;
+  }
+  else if( battery_mV > 14500 )
+  {
+    charging = false;
+  }
+  if( battery_mV < 9000 )
+  {
+    powerok  = false;
+    if(timer==0)
+    {
+      beep(100);
+    }
+  }
+  else
+  {
+    powerok = true;
+  }
+  
   // if timer expired do: pump off, rest or check sensor
   if( timer <= 0 )
   {
@@ -123,9 +156,18 @@ void loop()
     {
       if( sensorValue < treshHold )
       {
-        Serial.println("PUMP ON!");
-        pumping = true;
-        setTimer(PumpOnTime);
+        if( powerok )
+        {
+          Serial.println("PUMP ON!");
+          pumping = true;
+          setTimer(PumpOnTime);
+          beep(50);
+        }
+        else
+        {
+          Serial.println("POWER LOW, CANNOT PUMP");
+          beep(1000);
+        }
       }
       else
       {
@@ -133,23 +175,17 @@ void loop()
       }
     }
   }
-  if( battery_mV < 13000 )
-  {
-    charging = true;
-  }
-  else if( battery_mV > 14500 )
-  {
-    charging = false;
-  }
-  Serial.print("pumping=");Serial.print(pumping);
-  Serial.print(" charging=");Serial.print(charging);
-  Serial.print(" timer=");Serial.print(timer);
-  Serial.print(" sensor=");Serial.print(sensorValue);
-  Serial.print(" battery=");Serial.print(battery_mV);
+  Serial.print("Dsen=");Serial.print(sensorValue);
+  Serial.print(" Vbat=");Serial.print(battery_mV);
   Serial.print(" Vcc=");Serial.print(readVcc());
+  if(!powerok) Serial.print(" LOW!");
+  if(charging) Serial.print(" charging");
+  if(pumping) Serial.print(" pumping");
+  Serial.print(" T=");Serial.print(timer);
+
   Serial.println();
-  digitalWrite(SOLAR_PIN, charging? 0 : 1); // relay driver is active low
-  digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low
+  digitalWrite(SOLAR_PIN, charging? 1 : 0); // relay driver is active low
+  digitalWrite(PUMP_PIN, pumping && powerok ? 0 : 1); // relay driver is active low
   sleep1s();
   // timer should always be >= 0
   --timer;
