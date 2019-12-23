@@ -76,12 +76,12 @@ void beep(int ms=100)
 
 bool pumping = false;
 bool charging = false;
-bool powerok = false;
+bool powerok = true;
 int timer = 0;
 
 const unsigned PumpOnTime = 30;
-const unsigned PumpRestTime = 15*60;
-const unsigned SamplingTime = 10;
+const unsigned PumpRestTime = 30*60;
+const unsigned SamplingTime = 1;
 
 void setTimer(int seconds)
 {
@@ -121,7 +121,9 @@ void loop()
     setTimer(0);
     digitalWrite(LED_PIN,1);
     beep(1000);
+    powerok = true;    
   }
+  // decide to charge or not
   if( battery_mV < 13000 )
   {
     charging = true;
@@ -129,18 +131,14 @@ void loop()
   else if( battery_mV > 14500 )
   {
     charging = false;
+    powerok = true;
   }
-  if( battery_mV < 9000 )
+  // check if there is suffitient power
+  if(battery_mV < (pumping ? 8000 : 10000))
   {
     powerok  = false;
-    if(timer==0)
-    {
-      beep(100);
-    }
-  }
-  else
-  {
-    powerok = true;
+    pumping = false;
+    beep(500);
   }
   
   // if timer expired do: pump off, rest or check sensor

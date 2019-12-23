@@ -30,6 +30,13 @@ void setup()
   Serial.print("TreshHold = ");Serial.println(treshHold);
   digitalWrite(PUMP_PIN, 0);
   pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(LED_PIN,0);
+  pinMode(LED_PIN, OUTPUT);
+  for(auto i = 0; i < 5; i++)
+  {
+    Serial.print('.');
+    delay(1000);
+  }
 }
 
 
@@ -46,8 +53,8 @@ bool pumping = false;
 int timer = 0;
 
 const unsigned PumpOnTime = 30;
-const unsigned PumpRestTime = 15*60;
-const unsigned SamplingTime = 10;
+const unsigned PumpRestTime = 30*60;
+const unsigned SamplingTime = 2;
 
 void setTimer(int seconds)
 {
