@@ -1,0 +1,289 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <WiFiClient.h>
+#include <WiFiUdp.h>
+#include <FS.h>
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void append(String& s, char* from, int len)
+{
+  while(len-- > 0)
+  {
+    s += *(from++);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+WiFiUDP UDP;                     // Create an instance of the WiFiUDP class to send and receive
+const char* NTPServerName = "time.nist.gov";
+const int NTP_PACKET_SIZE = 48;  // NTP time stamp is in the first 48 bytes of the message
+const int NTP_SOCKET = 123;
+
+inline int getSeconds(uint32_t UNIXTime) {
+  return UNIXTime % 60;
+}
+
+inline int getMinutes(uint32_t UNIXTime) {
+  return UNIXTime / 60 % 60;
+}
+
+inline int getHours(uint32_t UNIXTime) {
+  return UNIXTime / 3600 % 24;
+}
+
+class Ntp
+{
+  public:
+  
+  static uint32_t getResponse()
+  {
+    if (UDP.parsePacket() == 0) { // If there's no response (yet)
+      return 0;
+    }    
+    byte buf[NTP_PACKET_SIZE]; // buffer to hold incoming and outgoing packets
+    UDP.read(buf, NTP_PACKET_SIZE); // read the packet into the buffer
+    // Combine the 4 timestamp bytes into one 32-bit number
+    uint32_t ntpTime = (buf[40] << 24) | (buf[41] << 16) | (buf[42] << 8) | buf[43];
+    // Convert NTP time to a UNIX timestamp:
+    // Unix time starts on Jan 1 1970. That's 2208988800 seconds in NTP time:
+    const uint32_t UxTimeBase = 2208988800UL;
+    // subtract seventy years:
+    uint32_t uxTime  = ntpTime - UxTimeBase;
+    return uxTime;
+  }
+
+  static void sendPacket(IPAddress& address) 
+  {
+    byte buf[NTP_PACKET_SIZE]; // buffer to hold incoming and outgoing packets
+    memset(buf, 0, NTP_PACKET_SIZE);  // set all bytes in the buffer to 0
+    // Initialize values needed to form NTP request
+    buf[0] = 0b11100011;   // LI, Version, Mode
+    // send a packet requesting a timestamp:
+    UDP.beginPacket(address, NTP_SOCKET);
+    UDP.write(buf, NTP_PACKET_SIZE);
+    UDP.endPacket();
+  }
+
+  static uint32_t getTime() 
+  {
+    IPAddress timeServerIP;
+    if(!WiFi.hostByName(NTPServerName, timeServerIP))
+      return 0;
+    uint32_t t = 0;
+    int tries = 10;
+    while(t==0 && tries-- > 0)
+    {
+      Serial.print(String("NTP: requesting time from ") + NTPServerName);
+      sendPacket(timeServerIP);
+      int waitcnt = 10;
+      while(waitcnt-- > 0)
+      {
+        auto resp = getResponse();
+        if(resp)
+        {
+          t = resp;
+          Serial.print(" got response t="+String(t,DEC));
+          break;
+        }
+        Serial.print(",");
+        delay(100);
+      }
+      Serial.println();
+    }
+  }
+};
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+String WiFiSSID = "w2";
+String WiFiPass = "stoinastacjilokomotywa";
+
+WiFiClient espClient;
+
+void connectWiFi()
+{
+  WiFi.begin(WiFiSSID.c_str(), WiFiPass.c_str());
+  Serial.print("Connecting to WIFI");
+  while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN,1);
+    delay(500);
+    digitalWrite(LED_BUILTIN,0);
+    Serial.print(".");
+  }
+  Serial.println("OK!");
+  Serial.print("IP ");
+  Serial.println(WiFi.localIP());
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// MQTT
+
+String MqttServer = "rpihub"; 
+int    MqttPort = 1883; 
+String MqttUser = "";
+String MqttPassword = "";
+
+PubSubClient client(espClient);
+
+
+void publish(const char* subTopic, const char* msg)
+{
+  String t("esp/");
+  t += WiFi.macAddress();
+  t += '/';
+  t += subTopic;
+  client.publish(t.c_str(), msg);
+}
+
+void publish(const char* subTopic, const String& msg)
+{
+  publish(subTopic, msg.c_str());
+}
+
+
+void subscribeCallback(const char* topic, byte* payload, unsigned int length)
+{
+  Serial.print(topic);
+  Serial.print(" PLen=");
+  Serial.println(length);
+  String msg;
+  append(msg,(char*)payload,length);
+  Serial.println(msg);
+  
+  if( msg == "restart" )
+  {
+    Serial.println("restarting!");
+    ESP.restart();
+  }
+  
+  if(length > 1 && (msg[0]=='d' || msg[0]=='a')) // [a|d]<n>=<v> or [a|d]<n>
+  {
+    auto i = 1;
+    auto pin = 0;
+    while(i < length && isdigit(msg[i]))
+    {
+      pin *= 10;
+      pin += msg[i] -'0';
+      i++;
+    }
+    if(i < length && msg[i]=='=')
+    {
+      ++i;      
+      auto val = 0;
+      while(i < length && isdigit(msg[i]))
+      {
+        val *= 10;
+        val += msg[i] -'0';
+        i++;
+      }
+      Serial.println(String(msg[0])+String(pin,DEC)+" <= "+String(val,DEC));
+      pinMode(pin,OUTPUT);
+      if(msg[0]=='d') digitalWrite(pin, val); else analogWrite(pin, val);
+    }
+    else
+    {
+      pinMode(pin,INPUT);
+    }
+    String msg = msg[0] + pin + "=" + (msg[0]=='d' ? digitalRead : analogRead)(pin);
+    publish("ret", msg.c_str());
+  }
+}
+
+
+void connectMqtt()
+{
+  client.setServer(MqttServer.c_str(), MqttPort);
+  client.setCallback(subscribeCallback);
+  
+  while(!client.connected()) 
+  {
+    Serial.print("Connecting to MQTT...");
+    if (client.connect("ESP8266Client", MqttUser.c_str(), MqttPassword.c_str() )) 
+    {
+      Serial.println("OK!");
+    } 
+    else 
+    {
+      Serial.print("failed, state=");
+      Serial.println(client.state());
+      delay(500);
+    }
+  }
+  // publis to "esp/new" a connection with MAC address (which is static and unique)
+  client.publish("esp/new", WiFi.macAddress().c_str());
+  client.subscribe((String("esp/")+WiFi.macAddress()+"/cmd").c_str(), 1);
+}
+
+
+void statePublish()
+{
+  publish("state","{'A0':"+String(analogRead(A0),DEC)+", 'TIME':"+String(Ntp::getTime(),DEC)+"}");
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void initializeConfiguration()
+{
+  const auto CONFIG_FILENAME = "/config.ini";
+  
+  if( auto cf = SPIFFS.open(CONFIG_FILENAME, "r") )
+  {
+    Serial.println("using config file for initialization");
+  }
+  else
+  {
+    Serial.println("config file not found, using defaults");    
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void setup()
+{
+  pinMode(LED_BUILTIN,OUTPUT);
+  digitalWrite(LED_BUILTIN,1);
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println("ESP MQTThing");
+  Serial.println("MAC " + WiFi.macAddress());
+  SPIFFS.begin();
+  //SPIFFS.check();
+  //SPIFFS.gc();
+  FSInfo fs_info;
+  SPIFFS.info(fs_info);
+  Serial.println("FS "+ String(fs_info.usedBytes,DEC) + "/" + String(fs_info.totalBytes,DEC));
+  initializeConfiguration();
+  digitalWrite(LED_BUILTIN,0);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void loop() 
+{
+  // monitor connections in a loop in case they fail along the way
+  
+  if(WiFi.status() != WL_CONNECTED) 
+    connectWiFi();    
+    
+  if(!client.connected()) 
+    connectMqtt();
+
+  // do the work
+  {
+    static auto lastUpdateTime = millis();
+    auto now = millis();  
+    if( now - lastUpdateTime > 10000 )
+    {
+      lastUpdateTime = now;
+      digitalWrite(LED_BUILTIN,1);
+      statePublish();
+      digitalWrite(LED_BUILTIN,0);
+    }
+  }
+
+  client.loop();
+}
