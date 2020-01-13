@@ -78,7 +78,7 @@ void beep(int ms=100, int waitafter = 0)
 
 bool pumping = false;
 bool charging = false;
-bool powerok = false;
+bool powerok = true;
 int timer = 0;
 
 const unsigned PumpOnTime = 30;
@@ -125,6 +125,7 @@ void loop()
   else if( battery_mV > 14500 )
   {
     charging = false;
+    powerok = true;
   }
   if( battery_mV < 8000 )
   {
