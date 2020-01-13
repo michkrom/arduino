@@ -26,8 +26,12 @@ void setup()
   Serial.println("command without V reads the pin state");
 }
 
+enum class STATE {
+  START,
+  SPACE,
+  ENDL
+} state = STATE::START; // 0 waiting for cmd; 1 waiting for space; 2 wating for endln
 
-byte state = 0; // 0 waiting for cmd; 1 waiting for space; 2 wating for endln
 enum class PINTYPE {
   ANALOG,
   DIGITAL
@@ -36,6 +40,7 @@ enum class OPERATION {
   READ,
   WRITE
 } oper = OPERATION::READ;
+
 byte pin;
 byte val;
 bool repeat = false;
@@ -47,6 +52,8 @@ void execute()
   {
     Serial.print(pin);
     Serial.print("->");
+
+    pinMode(pin,INPUT);    
     if( pinType == PINTYPE::DIGITAL ) {
       Serial.print(digitalRead(pin));
     }
@@ -77,7 +84,7 @@ void loop()
     // read the most recent byte (which will be from 0 to 255)
     byte in = Serial.read();
     switch(state) {
-      case 0:
+      case STATE::START:
         if( in == 'd' || in == 'a' ) 
         {
           pinType = in == 'd' ? PINTYPE::DIGITAL : PINTYPE::ANALOG;
@@ -85,14 +92,14 @@ void loop()
           pin = 0;
           val = 0;
           repeat = false;
-          state++;
+          state=STATE::SPACE;
         } 
         else if( in == 'r' )
         {
           repeat = true;
         }
         break;
-      case 1:
+      case STATE::SPACE:
         if( in >= '0' && in <= '9' )
         {
           pin *= 10;
@@ -100,11 +107,11 @@ void loop()
         }
         else if( in == ' ' )
         {
-          state++;
+          state=STATE::ENDL;
           oper = OPERATION::WRITE;
         }
         break;
-      case 2:
+      case STATE::ENDL:
         if( in >= '0' && in <= '9' )
         {
           val *= 10;
@@ -117,7 +124,7 @@ void loop()
     {
       Serial.println("\r\n");
       execute();
-      state = 0;
+      state = STATE::START;
     }
   }
   if(repeat) execute();

@@ -4,6 +4,7 @@
 // - solar changing is monitored via voltage sense through resistive divider ~1:10
 
 // A0 is water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
+// A1 is battery voltage via a ~1:10 divider
 
 // D 4/5/6/7 are relays (zero-active): D4 is pump (active low)
 // D8 is solar panel via MOSFET solid state relay (active high)
@@ -32,7 +33,7 @@ int readSensor()
 long readBattery()
 {
   const int AVERAGECOUNT = 16;
-  // measured 13.01V--> 290 DAC COUNTS
+  // measured 12.86V--> 258 DAC COUNTS (this may be temp dependent!)
   const int MUL = 12860;
   const int DIV = 258*AVERAGECOUNT;
   int32_t sum = 0;
@@ -66,11 +67,12 @@ void sleep1s()
   delay(500UL);
 }
 
-void beep(int ms=100)
+void beep(int ms=100, int waitafter = 0)
 {
   digitalWrite(BEEP_PIN,1);
   delay(ms);
   digitalWrite(BEEP_PIN,0);      
+  delay(waitafter);
 }
 
 
@@ -80,7 +82,7 @@ bool powerok = false;
 int timer = 0;
 
 const unsigned PumpOnTime = 30;
-const unsigned PumpRestTime = 15*60;
+const unsigned PumpRestTime = 30*60;
 const unsigned SamplingTime = 10;
 
 void setTimer(int seconds)
@@ -112,16 +114,10 @@ void setup()
 
 void loop()
 {
-  // read the sensor always
+  // read the sensor and battery state
   auto sensorValue = readSensor();
   auto battery_mV= readBattery();
-  if( sensorValue < 10 )
-  {
-    // sensor forcefully grounded -> reset the timer
-    setTimer(0);
-    digitalWrite(LED_PIN,1);
-    beep(1000);
-  }
+  // decide what to do
   if( battery_mV < 13000 )
   {
     charging = true;
@@ -130,17 +126,28 @@ void loop()
   {
     charging = false;
   }
-  if( battery_mV < 9000 )
+  if( battery_mV < 8000 )
   {
     powerok  = false;
+    pumping = false;
     if(timer==0)
     {
-      beep(100);
+      beep(200,100);
+      beep(200,100);
     }
   }
-  else
+  else if( !powerok && battery_mV > 13000 )
   {
     powerok = true;
+  }
+
+  // check for override
+  if( sensorValue < 10 )
+  {
+    // sensor forcefully grounded -> reset the timer
+    setTimer(0);
+    digitalWrite(LED_PIN,1);
+    beep(1000);
   }
   
   // if timer expired do: pump off, rest or check sensor
@@ -165,8 +172,10 @@ void loop()
         }
         else
         {
-          Serial.println("POWER LOW, CANNOT PUMP");
-          beep(1000);
+          Serial.println("POWER LOW, CANNOT PUMP!");
+          beep(100,100);
+          beep(500,100);
+          beep(100,100);
         }
       }
       else
@@ -185,7 +194,7 @@ void loop()
 
   Serial.println();
   digitalWrite(SOLAR_PIN, charging? 1 : 0); // relay driver is active low
-  digitalWrite(PUMP_PIN, pumping && powerok ? 0 : 1); // relay driver is active low
+  digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low
   sleep1s();
   // timer should always be >= 0
   --timer;
