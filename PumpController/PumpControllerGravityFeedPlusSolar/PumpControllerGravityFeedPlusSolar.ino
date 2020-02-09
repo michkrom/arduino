@@ -1,6 +1,7 @@
+#include <EEPROM.h>
 
 // water pump controller with solar charging control 
-// - the pump just floods syphoning system and then rest to let it drain with gravity
+// - the pump just floods syphoning system and then rests to let it drain with gravity
 // - solar changing is monitored via voltage sense through resistive divider ~1:10
 
 // A0 is water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
@@ -14,10 +15,89 @@
 #define SOLAR_PIN 8
 #define BEEP_PIN 11
 
-// sensor readout to start pumping in dac counts
+// return Vcc in [mV] measured using internal reference 1.1V
 
-// water sense treshold (lawer reading means water is present)
-int treshHold = 650;
+long readVcc()
+{
+  // read 1.1V Vref against AVcc first
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1); 
+  // wait for Vref to settle 
+  delay(2); 
+  // read several time and average
+  const int AVERAGECOUNT = 16;
+  uint32_t sum = 0;
+  for(int i=0; i < AVERAGECOUNT; ++i)
+  {
+    ADCSRA |= _BV(ADSC); 
+    // convert 
+    while(bit_is_set(ADCSRA, ADSC)); 
+    uint16_t v = ADCL;
+    v |= ADCH<<8; 
+    sum += v;
+  }
+  sum /= AVERAGECOUNT;
+  
+  auto result = 1126400L / sum; // Back-calculate AVcc in mV 
+  return result; 
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Configuration data
+
+typedef struct ConfigStruct
+{
+  uint16_t checkSum{0};  // simple check sum of the configuration data
+  uint16_t batMV{12860}; // measured 12.86V--> 258 DAC COUNTS (this may be temp dependent!)
+  uint16_t batDAC{258}; // corresponding DAC for measured mV
+  uint16_t batMaxMV = 13500; // max mV (stops charging)
+  uint16_t batMinMV = 8000; // min mV (stops pumping until chaged)
+  uint16_t batChargeMV = 13000; // charge start treshold
+  uint16_t pumpTreshold{650}; // water sense treshold (lower reading means water is present)
+  uint16_t pumpOnTime{20}; // seconds to turn the pump on
+  uint16_t pumpRestTime{60*60}; // time between pump can go on
+  uint16_t samplingTime{10}; // sampling time for checking water level
+  uint16_t stateUpdateTime{10}; // period to output state to Serial
+};
+
+ConfigStruct CONFIG;
+
+uint16_t computeChecksum(struct ConfigStruct& config)
+{
+  uint16_t sum = 0;
+  for(size_t i = sizeof(config.checkSum); i < sizeof(config); ++i)
+  {
+      sum += ((uint8_t*)&config)[i];
+  }
+  return sum;
+}
+
+void storeCONFIG()
+{
+  CONFIG.checkSum = computeChecksum(CONFIG);
+  EEPROM.put(0, CONFIG);
+  Serial.println("CONFIG stored into EEPROM");
+}
+
+bool loadCONFIG()
+{
+  ConfigStruct conf;
+  EEPROM.get(0, conf);
+  uint16_t cs = computeChecksum(conf);
+  if( cs == conf.checkSum )
+  {
+    CONFIG = conf;    
+    Serial.println("EEPROM configuation restored");
+    return true;
+  }
+  else
+  {
+    Serial.println("EEPROM configuation invalid");
+    return false;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// water sensor readout [dac counts]
 
 int readSensor()
 {
@@ -29,35 +109,21 @@ int readSensor()
   return ret;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// battery [mV] (via resistor divider)
 
-long readBattery()
+int readBattery()
 {
   const int AVERAGECOUNT = 16;
-  // measured 12.86V--> 258 DAC COUNTS (this may be temp dependent!)
-  const int MUL = 12860;
-  const int DIV = 258*AVERAGECOUNT;
-  int32_t sum = 0;
+  uint32_t sum = 0;
   for(int i=0; i < AVERAGECOUNT; ++i)
     sum += analogRead(A1);
-  sum = sum*MUL/DIV;
-  return (int)sum;
+  sum /= AVERAGECOUNT;
+  auto batMV = (sum*CONFIG.batMV)/CONFIG.batDAC;
+  return (int)batMV;
 }
 
-
-long readVcc() 
-{
-  long result; // Read 1.1V reference against AVcc 
-  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1); 
-  delay(2); 
-  // Wait for Vref to settle 
-  ADCSRA |= _BV(ADSC); 
-  // Convert 
-  while (bit_is_set(ADCSRA,ADSC)); 
-  result = ADCL;
-  result |= ADCH<<8; 
-  result = 1126400L / result; // Back-calculate AVcc in mV 
-  return result; 
-}
+////////////////////////////////////////////////////////////////////////////////
 
 void sleep1s()
 {
@@ -67,35 +133,234 @@ void sleep1s()
   delay(500UL);
 }
 
-void beep(int ms=100, int waitafter = 0)
+void beep(int duration_ms=100, int waitafter_ms = 0)
 {
   digitalWrite(BEEP_PIN,1);
-  delay(ms);
+  delay(duration_ms);
   digitalWrite(BEEP_PIN,0);      
-  delay(waitafter);
+  delay(waitafter_ms);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// state
 
-bool pumping = false;
+int  batteryMV = 0;
 bool charging = false;
 bool powerok = true;
-int timer = 0;
-
-const unsigned PumpOnTime = 30;
-const unsigned PumpRestTime = 30*60;
-const unsigned SamplingTime = 10;
+int  timer = 0;
+int  sensorValue = 0;
+bool pumping = false;
+int stateUpdateTime = 0;
 
 void setTimer(int seconds)
 {
   timer=seconds;
 }
 
+void outputState()
+{
+  Serial.print("{");
+  Serial.print("Dsen:");Serial.print(sensorValue);
+  Serial.print(", Vbat:");Serial.print(batteryMV);
+  Serial.print(", Vcc:");Serial.print(readVcc());
+  if(!powerok || charging || pumping)
+  {
+    Serial.print(", State:\"");
+    if(!powerok) Serial.print("LowPow");
+    if(charging) Serial.print("Charging");
+    if(pumping) Serial.print("Pumping");
+    Serial.print("\"");
+  }
+  Serial.print(", T:");Serial.print(timer);
+  Serial.print("}");
+  Serial.println();  
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// serial console input
+
+void help()
+{
+  Serial.println("b <battery mV as measured>");
+  Serial.println("p <pump treshhold DAC counts>");
+  Serial.println("o <pump on time seconds>");
+  Serial.println("r <pump rest time seconds >");
+  Serial.println("s <sampling period seconds>");
+  Serial.println("c <charge start treshold mV>");
+  Serial.println("e <charge end treshold mV>");
+  Serial.println("d <discharge stop treshold mV>");
+  Serial.println("u <state update period seconds>");
+}
+
+bool checkSerial()
+{
+  static char cmd = 0;
+  static int par = 0;
+
+  if( Serial.available() )
+  {
+    char ch = Serial.read();
+    if( isDigit(ch) )
+    {
+      par *= 10;
+      par += ch - '0';
+    }
+    else if( ch == 13 )
+    {
+      Serial.print("cmd=");Serial.print(cmd);Serial.println(par);
+      bool ok = true;
+      switch(cmd)
+      {
+        case 'b':
+          CONFIG.batMV = 1;
+          CONFIG.batDAC = 1;
+          CONFIG.batDAC = readBattery();
+          CONFIG.batMV = par;
+          break;
+        case 'd':
+          CONFIG.batMinMV = par;
+          break;
+        case 'e':
+          CONFIG.batMaxMV = par;
+          break;
+        case 'c':
+          CONFIG.batChargeMV = par;
+          break;        
+        case 'p':
+          CONFIG.pumpTreshold = par;
+          break;
+        case 'o':
+          CONFIG.pumpOnTime = par;
+          break;
+        case 'r':
+          CONFIG.pumpRestTime = par;
+          break;
+        case 's':
+          CONFIG.samplingTime = par;
+          break;
+        case 'u':
+          CONFIG.stateUpdateTime = par;
+          break;
+        default:
+          Serial.println("Invalid command");
+          help();
+          ok = false;
+          break;                 
+      }
+      if( ok ) storeCONFIG();
+      cmd = 0;
+      par = 0;
+    }
+    else if( ch <= ' ' )
+    {
+      // ignore
+    }
+    else 
+    {
+      cmd = ch;
+    }
+  }
+  return cmd != 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// decide what to do about battery state
+void checkBattery()
+{
+  // update battery state
+  batteryMV = readBattery();
+  
+  if( batteryMV < CONFIG.batChargeMV )
+  {
+    charging = true;
+  }
+  else if( batteryMV > CONFIG.batMaxMV )
+  {
+    charging = false;
+  }
+  
+  if( batteryMV < CONFIG.batMinMV )
+  {
+    powerok  = false;
+    pumping = false;
+    if(timer==0)
+    {
+      beep(200,100);
+      beep(200,100);
+    }
+  }
+  else if( !powerok && batteryMV > CONFIG.batChargeMV )
+  {
+    powerok = true;
+  }  
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// decide what to do about pumping
+void checkPumping()
+{  
+  // update sensor state
+  sensorValue = readSensor();
+  
+  // check for hard override (sensor shorted by user)
+  if( sensorValue < 10 )
+  {
+    // sensor forcefully grounded -> reset the timer and that will turn the pump on below
+    setTimer(0);
+    digitalWrite(LED_PIN,1);
+    beep(1000);
+  }
+  
+  // if timer expired do: pump off, rest or check sensor
+  if( timer <= 0 )
+  {
+    auto t = CONFIG.samplingTime;
+    if( pumping )
+    {
+      Serial.println("PUMP OFF!");
+      pumping = false;
+      t = CONFIG.pumpRestTime;
+      outputState();
+    }
+    else // not pumping so start checking sensor
+    {
+      if( sensorValue < CONFIG.pumpTreshold )
+      {
+        if( powerok )
+        {
+          Serial.println("PUMP ON!");
+          pumping = true;
+          t = CONFIG.pumpOnTime;
+          outputState();
+          beep(50,50);
+          beep(50,50);
+          beep(50,50);
+        }
+        else
+        {
+          Serial.println("POWER LOW, CANNOT PUMP!");
+          beep(2000);
+        }
+      }
+    }
+    setTimer(t);
+  }
+  digitalWrite(SOLAR_PIN, charging? 1 : 0); // relay driver is active low
+  digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low  
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 void setup()
 {
   // begin the serial communication
   Serial.begin(9600);
   Serial.println("Pump controller.");
-  Serial.print("TreshHold = ");Serial.println(treshHold);
+  if( !loadCONFIG() )
+  {
+    storeCONFIG();
+  }
+  Serial.print("Pump TreshHold = ");Serial.println(CONFIG.pumpTreshold);
   digitalWrite(PUMP_PIN, 1);
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(BEEP_PIN, 0);
@@ -111,92 +376,25 @@ void setup()
   Serial.println("Ready!");
 }
 
+////////////////////////////////////////////////////////////////////////////////
 
 void loop()
 {
-  // read the sensor and battery state
-  auto sensorValue = readSensor();
-  auto battery_mV= readBattery();
-  // decide what to do
-  if( battery_mV < 13000 )
-  {
-    charging = true;
-  }
-  else if( battery_mV > 14500 )
-  {
-    charging = false;
-    powerok = true;
-  }
-  if( battery_mV < 8000 )
-  {
-    powerok  = false;
-    pumping = false;
-    if(timer==0)
+  bool inputPending = checkSerial();
+  if(!inputPending)
+  {  
+    checkBattery();
+    checkPumping();
+    sleep1s();
+    --timer;
+    if(timer < 0)
     {
-      beep(200,100);
-      beep(200,100);
+      setTimer(CONFIG.samplingTime);
+    }
+    if( --stateUpdateTime <= 0 )
+    {
+      outputState();
+      stateUpdateTime = CONFIG.stateUpdateTime;
     }
   }
-  else if( !powerok && battery_mV > 13000 )
-  {
-    powerok = true;
-  }
-
-  // check for override
-  if( sensorValue < 10 )
-  {
-    // sensor forcefully grounded -> reset the timer
-    setTimer(0);
-    digitalWrite(LED_PIN,1);
-    beep(1000);
-  }
-  
-  // if timer expired do: pump off, rest or check sensor
-  if( timer <= 0 )
-  {
-    if( pumping )
-    {
-      Serial.println("PUMP OFF!");
-      pumping = false;
-      setTimer(PumpRestTime);
-    }
-    else // not pumping so start checking sensor
-    {
-      if( sensorValue < treshHold )
-      {
-        if( powerok )
-        {
-          Serial.println("PUMP ON!");
-          pumping = true;
-          setTimer(PumpOnTime);
-          beep(50);
-        }
-        else
-        {
-          Serial.println("POWER LOW, CANNOT PUMP!");
-          beep(100,100);
-          beep(500,100);
-          beep(100,100);
-        }
-      }
-      else
-      {
-        setTimer(SamplingTime);
-      }
-    }
-  }
-  Serial.print("Dsen=");Serial.print(sensorValue);
-  Serial.print(" Vbat=");Serial.print(battery_mV);
-  Serial.print(" Vcc=");Serial.print(readVcc());
-  if(!powerok) Serial.print(" LOW!");
-  if(charging) Serial.print(" charging");
-  if(pumping) Serial.print(" pumping");
-  Serial.print(" T=");Serial.print(timer);
-
-  Serial.println();
-  digitalWrite(SOLAR_PIN, charging? 1 : 0); // relay driver is active low
-  digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low
-  sleep1s();
-  // timer should always be >= 0
-  --timer;
 }

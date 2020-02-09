@@ -4,6 +4,8 @@
 #include <FS.h>
 #include <PubSubClient.h>
 
+#include "dht11.h"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void append(String& s, char* from, int len)
@@ -148,9 +150,61 @@ void mqttConnect()
 }
 
 
+void jsonAddEntry(String& buf, const char* name, const char* value)
+{
+  buf += buf == "" ? '{' : ',';
+  buf += '"';
+  buf += name;
+  buf += "\":";
+  buf += value;
+}
+
+void jsonAddEntry(String& buf, const char* name, const String& value)
+{
+  jsonAddEntry(buf,name,value.c_str());
+}
+
+template<class T>
+void jsonAddEntry(String& buf, const char* name, T value)
+{
+  jsonAddEntry(buf, name, String(value).c_str());
+}
+
+template<int D>
+class X
+{
+  public:
+  struct R { int rh; int t; };
+  static R read() { return R{0,0};}
+};
+
+// LoLin ESP8266
+#define D0 16
+#define D1 5
+#define D2 4
+#define D3 0
+#define D4 2
+#define D5 14
+#define D6 12
+#define D7 13
+#define D8 15
+#define DRX 3
+#define DTX 1
+
 void mqttPublishState()
 {
-  mqttPublish("state","{\"A0\":"+String(analogRead(A0),DEC)+", \"MILLIS\":"+String(millis(),DEC)+"}");
+  String msg;
+  jsonAddEntry(msg, "A0", analogRead(A0));
+  jsonAddEntry(msg, "MILLIS", millis());
+  auto dht = DHT<D0>::read();
+  jsonAddEntry(msg, "RH", dht.rh);
+  jsonAddEntry(msg, "TEMP", dht.temp);
+  auto dht2 = DHT<D2>::read();
+  jsonAddEntry(msg, "RH2", dht2.rh);
+  jsonAddEntry(msg, "TEMP2", dht2.temp);
+  
+  msg += '}';
+  mqttPublish("state",msg);
 }
 
 
