@@ -14,6 +14,12 @@
 #define PUMP_PIN 4
 #define SOLAR_PIN 8
 #define BEEP_PIN 11
+#define DHT_PIN 12
+
+// DHT library uses DHTPIN is defined explicitly
+#define DHTPIN DHT_PIN
+#include <dht11.h>
+
 
 // return Vcc in [mV] measured using internal reference 1.1V
 
@@ -385,6 +391,7 @@ void loop()
   {  
     checkBattery();
     checkPumping();
+    checkTemp();
     sleep1s();
     --timer;
     if(timer < 0)

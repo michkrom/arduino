@@ -1,7 +1,7 @@
 #include <ESP8266WiFi.h>
 
 #define DHTPIN 5
-#include "dht11.h"
+#include <dht11.h>
 
 // Set web server port number to 80
 WiFiServer server(80);
