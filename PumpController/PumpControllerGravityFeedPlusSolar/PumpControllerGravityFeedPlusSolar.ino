@@ -1,4 +1,5 @@
 #include <EEPROM.h>
+#include <dht11pp.h>
 
 // water pump controller with solar charging control 
 // - the pump just floods syphoning system and then rests to let it drain with gravity
@@ -15,11 +16,6 @@
 #define SOLAR_PIN 8
 #define BEEP_PIN 11
 #define DHT_PIN 12
-
-// DHT library uses DHTPIN is defined explicitly
-#define DHTPIN DHT_PIN
-#include <dht11.h>
-
 
 // return Vcc in [mV] measured using internal reference 1.1V
 
@@ -45,6 +41,15 @@ long readVcc()
   
   auto result = 1126400L / sum; // Back-calculate AVcc in mV 
   return result; 
+}
+
+using MYDHT = DHT<DHT_PIN>;
+
+MYDHT::Result readTempHum()
+{
+  MYDHT dht;
+  auto result = dht.read();
+  return result;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -156,6 +161,7 @@ bool powerok = true;
 int  timer = 0;
 int  sensorValue = 0;
 bool pumping = false;
+MYDHT::Result temphum{};
 int stateUpdateTime = 0;
 
 void setTimer(int seconds)
@@ -169,6 +175,8 @@ void outputState()
   Serial.print("Dsen:");Serial.print(sensorValue);
   Serial.print(", Vbat:");Serial.print(batteryMV);
   Serial.print(", Vcc:");Serial.print(readVcc());
+  Serial.print(", Temp:");Serial.print(temphum.temp);
+  Serial.print(", RelHum:");Serial.print(temphum.rh);
   if(!powerok || charging || pumping)
   {
     Serial.print(", State:\"");
@@ -391,7 +399,7 @@ void loop()
   {  
     checkBattery();
     checkPumping();
-    checkTemp();
+    temphum = readTempHum();
     sleep1s();
     --timer;
     if(timer < 0)

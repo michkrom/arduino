@@ -11,19 +11,26 @@
 // In general, the DHT11 interraction is self-timing, ie. it will correctly estimate the 0 and 1 timing and read the data.
 //
 
-// For AVR assume the DHTPIN is in D register which corresponds to 0..7 of arduino pins
-// For ESP the DHTPIN is GPIO number (not Dx label numbers) see: https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
+// PIN READING MACROS
+// For AVR assume the DHTPIN is D0 to D13 (cant use Ax pins)
+// see: https://www.arduino.cc/en/Reference/PortManipulation
+// For ESP the DHTPIN is GPIO number (not Dx label numbers) 
+// see: https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
 
 #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
-  #if !defined(DHTPINREG)
+  #if DHTPIN > 7 // D8-D13
+    #define DHTPINREG PINB
+    #define DHTPINBIT (DHTPIN-8)
+  #else // D0-D7
     #define DHTPINREG PIND
+    #define DHTPINBIT DHTPIN
   #endif
   #if !defined(DHTREADPIN)
-    #define DHTREADPIN(PIN) ( (DHTPINREG & (1<<PIN)) ? HIGH : LOW )
+    #define DHTREADPIN(PIN) ( (DHTPINREG & (1<<DHTPINBIT) ? HIGH : LOW ) )
   #endif
 #else // presumably much faster CPU (non Arduino/AVR so assume ESP)
   #if !defined DHTREADPIN
-  #define DHTREADPIN(PIN) digitalRead(PIN)
+    #define DHTREADPIN(PIN) digitalRead(PIN)
   #endif
 #endif
 
@@ -101,10 +108,19 @@ private:
     // presumably much faster CPU (non Arduino/AVR so assume ESP) so no need to do anything
 #endif
   };
-  
 
-  static int8_t readPin() { 
-    return DHTREADPIN(DHTPIN); 
+
+  static int8_t readPin() {     
+    #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
+      if( DHTPIN > 7 )// D8-D13
+        return (PINB & (1<<(DHTPIN-8))) ? HIGH : LOW;
+      else // D0-D7
+        return (PIND & (1<<(DHTPIN-0))) ? HIGH : LOW;
+    #else // presumably much faster CPU (non Arduino/AVR so assume ESP)
+      #if !defined DHTREADPIN
+        #define DHTREADPIN(PIN) digitalRead(PIN)
+      #endif
+    #endif
   }
 
   // this timeout works even on slow 8MHz arduino and on ESP8266 
