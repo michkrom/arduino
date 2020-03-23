@@ -13,7 +13,8 @@
 
 #define LED_PIN 13
 #define PUMP_PIN 4
-#define SOLAR_PIN 8
+#define SOLAR_PIN 8 // positive solar charding signal (1==charge)
+#define SOLARN_PIN 9 // inverted (negative) solar charging signal (0--charge)
 #define BEEP_PIN 11
 #define DHT_PIN 12
 
@@ -107,6 +108,20 @@ bool loadCONFIG()
   }
 }
 
+void outputCONFIG()
+{
+  Serial.print("batMV: ");Serial.println(CONFIG.batMV);
+  Serial.print("batDAC: ");Serial.println(CONFIG.batDAC);
+  Serial.print("batMaxMV: ");Serial.println(CONFIG.batMaxMV);
+  Serial.print("batMinMV: ");Serial.println(CONFIG.batMinMV);
+  Serial.print("batChargeMV: ");Serial.println(CONFIG.batChargeMV);
+  Serial.print("pumpTreshold: ");Serial.println(CONFIG.pumpTreshold);
+  Serial.print("pumpOnTime: ");Serial.println(CONFIG.pumpOnTime);
+  Serial.print("pumpRestTime: ");Serial.println(CONFIG.pumpRestTime);
+  Serial.print("samplingTime: ");Serial.println(CONFIG.samplingTime);
+  Serial.print("stateUpdateTime: ");Serial.println(CONFIG.stateUpdateTime);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // water sensor readout [dac counts]
 
@@ -164,6 +179,8 @@ bool pumping = false;
 MYDHT::Result temphum{};
 int stateUpdateTime = 0;
 
+enum { GO_NOTHING, GO_PUMP_ON, GO_PUMP_OFF, GO_CHARGE_ON, GO_CHARGE_OFF } forceGo = GO_NOTHING;
+
 void setTimer(int seconds)
 {
   timer=seconds;
@@ -176,7 +193,7 @@ void outputState()
   Serial.print(", Vbat:");Serial.print(batteryMV);
   Serial.print(", Vcc:");Serial.print(readVcc());
   Serial.print(", Temp:");Serial.print(temphum.temp);
-  Serial.print(", RelHum:");Serial.print(temphum.rh);
+  Serial.print(", RH:");Serial.print(temphum.rh);
   if(!powerok || charging || pumping)
   {
     Serial.print(", State:\"");
@@ -186,6 +203,7 @@ void outputState()
     Serial.print("\"");
   }
   Serial.print(", T:");Serial.print(timer);
+  Serial.print(", TS:");Serial.print(millis()/1000);
   Serial.print("}");
   Serial.println();  
 }
@@ -195,86 +213,158 @@ void outputState()
 
 void help()
 {
-  Serial.println("b <battery mV as measured>");
-  Serial.println("p <pump treshhold DAC counts>");
-  Serial.println("o <pump on time seconds>");
-  Serial.println("r <pump rest time seconds >");
-  Serial.println("s <sampling period seconds>");
-  Serial.println("c <charge start treshold mV>");
-  Serial.println("e <charge end treshold mV>");
-  Serial.println("d <discharge stop treshold mV>");
-  Serial.println("u <state update period seconds>");
+  Serial.println("b<battery mV as measured>");
+  Serial.println("p<pump treshhold DAC counts>");
+  Serial.println("o<pump on time seconds>");
+  Serial.println("r<pump rest time seconds >");
+  Serial.println("s<sampling period seconds>");
+  Serial.println("c<charge start treshold mV>");
+  Serial.println("e<charge end treshold mV>");
+  Serial.println("d<discharge stop treshold mV>");
+  Serial.println("u<state update period seconds>");
+  Serial.println("x1 go pump on");
+  Serial.println("x2 go pump off");
+  Serial.println("x3 go charge on");
+  Serial.println("x4 go charge off");
+}
+
+// commands are in form <CmdChar><number(digits)><CR>
+
+bool executeCmd(char cmd, int par)
+{
+  bool res = false;
+  Serial.print("cmd ");Serial.print(cmd);Serial.print(' ');Serial.println(par);
+  bool storeConfig = false;
+  switch(cmd)
+  {
+    case 'b':
+      CONFIG.batMV = 1;
+      CONFIG.batDAC = 1;
+      CONFIG.batDAC = readBattery();
+      CONFIG.batMV = par;
+      storeConfig = true;
+      break;
+    case 'd':
+      CONFIG.batMinMV = par;
+      storeConfig = true;
+      break;
+    case 'e':
+      CONFIG.batMaxMV = par;
+      storeConfig = true;
+      break;
+    case 'c':
+      CONFIG.batChargeMV = par;
+      storeConfig = true;
+      break;        
+    case 'p':
+      CONFIG.pumpTreshold = par;
+      storeConfig = true;
+      break;
+    case 'o':
+      CONFIG.pumpOnTime = par;
+      storeConfig = true;
+      break;
+    case 'r':
+      CONFIG.pumpRestTime = par;
+      storeConfig = true;
+      break;
+    case 's':
+      CONFIG.samplingTime = par;
+      storeConfig = true;
+      break;
+    case 'u':
+      CONFIG.stateUpdateTime = par;
+      storeConfig = true;
+      break;
+  }
+  if( storeConfig ) 
+  {
+    outputCONFIG();
+    storeCONFIG();
+    res = true;
+  }
+  else // if(!storeConfig) // there was not correct config update cmd
+  {
+    switch(cmd)
+    {
+    case 'x': // go
+      switch(par)
+      {
+        case 1: forceGo = GO_PUMP_ON; break; // x1
+        case 2: forceGo = GO_PUMP_OFF; break; // x2
+        case 3: forceGo = GO_CHARGE_ON; break; // x3
+        case 4: forceGo = GO_CHARGE_OFF; break; // x4
+        default:
+              res = false;
+      }
+      break;
+    case 0:
+      outputCONFIG();
+      break;
+    case '?':
+      outputCONFIG();
+      help();
+      break;
+    default:
+      Serial.println("Invalid command");
+      help();
+      break;
+    }
+  }
+  return res;
 }
 
 bool checkSerial()
 {
-  static char cmd = 0;
-  static int par = 0;
+  static struct {
+    char cmd{};
+    bool inPar{};
+    int par{};
+
+    void reset() {
+      cmd = 0;
+      inPar = false;
+      par = 0;
+    }
+  } state{};
+
+  bool ret = false;
 
   if( Serial.available() )
   {
+    ret = true;
     char ch = Serial.read();
-    if( isDigit(ch) )
+    if( ch == 13 ) // command terminated - execute
     {
-      par *= 10;
-      par += ch - '0';
-    }
-    else if( ch == 13 )
-    {
-      Serial.print("cmd=");Serial.print(cmd);Serial.println(par);
-      bool ok = true;
-      switch(cmd)
-      {
-        case 'b':
-          CONFIG.batMV = 1;
-          CONFIG.batDAC = 1;
-          CONFIG.batDAC = readBattery();
-          CONFIG.batMV = par;
-          break;
-        case 'd':
-          CONFIG.batMinMV = par;
-          break;
-        case 'e':
-          CONFIG.batMaxMV = par;
-          break;
-        case 'c':
-          CONFIG.batChargeMV = par;
-          break;        
-        case 'p':
-          CONFIG.pumpTreshold = par;
-          break;
-        case 'o':
-          CONFIG.pumpOnTime = par;
-          break;
-        case 'r':
-          CONFIG.pumpRestTime = par;
-          break;
-        case 's':
-          CONFIG.samplingTime = par;
-          break;
-        case 'u':
-          CONFIG.stateUpdateTime = par;
-          break;
-        default:
-          Serial.println("Invalid command");
-          help();
-          ok = false;
-          break;                 
-      }
-      if( ok ) storeCONFIG();
-      cmd = 0;
-      par = 0;
+      executeCmd(state.cmd, state.par);
+      state.reset();
     }
     else if( ch <= ' ' )
     {
       // ignore
     }
-    else 
+    else if( state.cmd > 0 && isDigit(ch) )
     {
-      cmd = ch;
+      state.inPar = true;
+      state.par *= 10;
+      state.par += ch - '0';
+    }
+    else if( state.inPar || state.cmd == 0 && isDigit(ch) ) // got something else? scrap the whole thing
+    {
+      Serial.print("unexpected input: ");Serial.println(ch);
+      state.reset();
+    }
+    else if( state.cmd == 0 )
+    {
+      state.cmd = ch;
+    }
+    else
+    {
+      Serial.print("unexpected state: ");Serial.println(ch);
+      state.reset();
     }
   }
-  return cmd != 0;
+  return ret;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -292,6 +382,17 @@ void checkBattery()
   {
     charging = false;
   }
+
+  if(forceGo == GO_CHARGE_ON)
+  {
+    charging = true;
+    forceGo = GO_NOTHING;
+  }  
+  if(forceGo == GO_CHARGE_OFF)
+  {
+    charging = false;
+    forceGo = GO_NOTHING;
+  }  
   
   if( batteryMV < CONFIG.batMinMV )
   {
@@ -309,14 +410,35 @@ void checkBattery()
   }  
 }
 
+void setSolarCharging(bool on)
+{
+  digitalWrite(SOLAR_PIN, charging? 1 : 0); // active high
+  digitalWrite(SOLARN_PIN, charging? 0 : 1); // relay driver is active low  
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // decide what to do about pumping
 void checkPumping()
 {  
   // update sensor state
-  sensorValue = readSensor();
+  if(forceGo == GO_PUMP_ON)
+  {
+     sensorValue = 0;
+     forceGo = GO_NOTHING;
+  }
+  else if(forceGo == GO_PUMP_OFF)
+  {
+     if(pumping)
+     {
+       timer = 0;
+     }
+  }
+  else
+  {
+    sensorValue = readSensor();
+  }
   
-  // check for hard override (sensor shorted by user)
+  // check for hard override (sensor shorted)
   if( sensorValue < 10 )
   {
     // sensor forcefully grounded -> reset the timer and that will turn the pump on below
@@ -359,7 +481,7 @@ void checkPumping()
     }
     setTimer(t);
   }
-  digitalWrite(SOLAR_PIN, charging? 1 : 0); // relay driver is active low
+  setSolarCharging(charging); // relay driver is active low
   digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low  
 }
 
@@ -367,25 +489,33 @@ void checkPumping()
 
 void setup()
 {
+  // after turnon the ESP may spew its output for a while
+  delay(1000);
   // begin the serial communication
   Serial.begin(9600);
+  digitalWrite(BEEP_PIN, 0);
+  pinMode(BEEP_PIN, OUTPUT);
+  for(auto n = 0; n < 5; ++n) {
+    beep(50);
+    delay(1000);
+    Serial.print('.');
+  }
+  // dump the serial input if any
+  while(Serial.available()) { Serial.read(); delay(1); }
+  
+  Serial.println();
   Serial.println("Pump controller.");
   if( !loadCONFIG() )
   {
     storeCONFIG();
   }
-  Serial.print("Pump TreshHold = ");Serial.println(CONFIG.pumpTreshold);
+  outputCONFIG();
   digitalWrite(PUMP_PIN, 1);
   pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(BEEP_PIN, 0);
-  pinMode(BEEP_PIN, OUTPUT);
   digitalWrite(SOLAR_PIN, 0);
   pinMode(SOLAR_PIN, OUTPUT);
-  for(auto n = 0; n < 5; ++n) {
-    beep(50);
-    delay(1000UL);
-    Serial.print('.');
-  }
+  digitalWrite(SOLARN_PIN, 1);
+  pinMode(SOLARN_PIN, OUTPUT);
   beep(200);
   Serial.println("Ready!");
 }
@@ -394,22 +524,22 @@ void setup()
 
 void loop()
 {
-  bool inputPending = checkSerial();
-  if(!inputPending)
-  {  
-    checkBattery();
-    checkPumping();
-    temphum = readTempHum();
+  bool hadInput = checkSerial();
+  checkBattery();
+  checkPumping();
+  temphum = readTempHum();
+  if(!hadInput)
+  {
     sleep1s();
     --timer;
-    if(timer < 0)
-    {
-      setTimer(CONFIG.samplingTime);
-    }
-    if( --stateUpdateTime <= 0 )
-    {
-      outputState();
-      stateUpdateTime = CONFIG.stateUpdateTime;
-    }
+  }
+  if(timer < 0)
+  {
+    setTimer(CONFIG.samplingTime);
+  }
+  if( --stateUpdateTime <= 0 )
+  {
+    outputState();
+    stateUpdateTime = CONFIG.stateUpdateTime;
   }
 }
