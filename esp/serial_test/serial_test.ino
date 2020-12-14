@@ -1,3 +1,5 @@
+// ESP-01 programmes as generic esp-8266 w/ default params
+
 #include <ESP8266WiFi.h>
 
 void setup()
@@ -22,6 +24,7 @@ void setup()
 void loop() 
 {
   delay(1000);
-  Serial.print("WIFI ");Serial.println(WiFi.status());
-  Serial.print("A0   ");Serial.println(analogRead(A0));
+  Serial.print("WIFI STAT:");Serial.println(WiFi.status());
+  Serial.print("WIFI RSSI:");Serial.println(WiFi.RSSI());
+  Serial.print("A0=");Serial.println(analogRead(A0));
 }

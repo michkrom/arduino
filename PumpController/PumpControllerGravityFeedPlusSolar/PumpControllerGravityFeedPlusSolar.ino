@@ -1,20 +1,20 @@
 #include <EEPROM.h>
 #include <dht11pp.h>
 
-// water pump controller with solar charging control 
-// - the pump just floods syphoning system and then rests to let it drain with gravity
-// - solar changing is monitored via voltage sense through resistive divider ~1:10
+// water pump controller, shore powered and 2 pumps
+// also suports temp/hum via DHT device
 
 // A0 is water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
 // A1 is battery voltage via a ~1:10 divider
 
-// D 4/5/6/7 are relays (zero-active): D4 is pump (active low)
-// D8 is solar panel via MOSFET solid state relay (active high)
+// D 4/5/6/7 are relays (zero-active): D4 is pump 1 (active low); D5 is pump 2
+// D8 is solar panel via MOSFET solid state relay (active high) *** unused
+
+// D12 is DHT device
 
 #define LED_PIN 13
 #define PUMP_PIN 4
-#define SOLAR_PIN 8 // positive solar charding signal (1==charge)
-#define SOLARN_PIN 9 // inverted (negative) solar charging signal (0--charge)
+#define PUMP2_PIN 5
 #define BEEP_PIN 11
 #define DHT_PIN 12
 
@@ -65,10 +65,11 @@ typedef struct ConfigStruct
   uint16_t batMinMV = 8000; // min mV (stops pumping until chaged)
   uint16_t batChargeMV = 13000; // charge start treshold
   uint16_t pumpTreshold{650}; // water sense treshold (lower reading means water is present)
-  uint16_t pumpOnTime{20}; // seconds to turn the pump on
-  uint16_t pumpRestTime{60*60}; // time between pump can go on
+  uint16_t pumpOnTime{300}; // seconds to turn the pump on
+  uint16_t pumpRestTime{300}; // time between pump can go on
   uint16_t samplingTime{10}; // sampling time for checking water level
   uint16_t stateUpdateTime{10}; // period to output state to Serial
+  uint16_t pump2OnTime{300}; // seconds to turn the pump on
 };
 
 ConfigStruct CONFIG;
@@ -120,6 +121,7 @@ void outputCONFIG()
   Serial.print("pumpRestTime: ");Serial.println(CONFIG.pumpRestTime);
   Serial.print("samplingTime: ");Serial.println(CONFIG.samplingTime);
   Serial.print("stateUpdateTime: ");Serial.println(CONFIG.stateUpdateTime);
+  Serial.print("pump2OnTime: ");Serial.println(CONFIG.pump2OnTime);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -171,20 +173,128 @@ void beep(int duration_ms=100, int waitafter_ms = 0)
 // state
 
 int  batteryMV = 0;
-bool charging = false;
 bool powerok = true;
-int  timer = 0;
 int  sensorValue = 0;
 bool pumping = false;
+bool pumping2 = false;
+
 MYDHT::Result temphum{};
 int stateUpdateTime = 0;
 
-enum { GO_NOTHING, GO_PUMP_ON, GO_PUMP_OFF, GO_CHARGE_ON, GO_CHARGE_OFF } forceGo = GO_NOTHING;
+enum ForceCommand { GO_NOTHING, GO_PUMP_ON, GO_PUMP1_ON, GO_PUMP_OFF, GO_CHARGE_ON, GO_CHARGE_OFF } forceGo = GO_NOTHING;
 
-void setTimer(int seconds)
+
+bool highWaterLevel()
 {
-  timer=seconds;
+  bool ret = false;
+  // check for hard override (sensor shorted)
+  if( sensorValue < 10 )
+  {
+    digitalWrite(LED_PIN,1);
+    beep(1000);
+    ret = true;
+  }  
+  if( sensorValue < CONFIG.pumpTreshold )
+  {
+    ret = true;
+  }
+  return ret;    
 }
+
+
+class Timer
+{
+public:
+  void reset() { mCount = 0; }
+  auto expired(int endCount) { return mCount > endCount; }
+  void increment() { mCount++; }
+  auto current() { return mCount; }
+private:
+  int  mCount{0};
+} timer;
+
+
+class StateMachine
+{
+  public:
+  enum class State { IDLE, PUMP1, PUMP2, REST };
+
+  State currentState() { return mState; }
+  const char* currentStateStr() { return state2Str(mState); }
+
+  void update()
+  {
+    auto nextState = nextState();
+    moveToNextState(nextState);
+    timer.increment();
+  }
+
+  State nextState()
+  {
+    STATE nextState = mState;
+    if( forceGo == GO_PUMP_ON ) nextState = State::PUMP1;
+    else if( forceGo == GO_PUMP2_ON ) nextState = STATE_PUMP2;
+    else switch(state)
+    {
+    case State::IDLE:
+      if( highWaterLevel() ) 
+        nextState = State::PUMP1;
+      break;
+    case State::PUMP1:
+      if(timer.expired(CONFIG.pumpOnTime)) 
+        nextState = State::PUMP2;
+      break;
+    case State::PUMP2:
+      if(timer.expired(CONFIG.pump2OnTime)) 
+        nextState = State::REST;
+      break;
+    case State::REST:
+      if(timer.expired(CONFIG.pumpRestTime))
+        nextState = State::IDLE;
+      break;
+    }
+  }
+
+  bool moveToNextState(State nextState)
+  {
+    bool moving = nextState != state;
+    if(moving)
+    {    
+      Serial.print("StateMachine ");
+      Serial.print(state2Str(state));
+      Serial.print("-->");
+      Serial.print(state2Str(nextState));
+      
+      // any state change resets the timer to zero
+      timer.reset();
+      state = nextState;
+      
+      // apply outputs
+      digitalWrite(PUMP_PIN, state == State::PUMP1 ? 0 : 1); // relay driver is active low
+      digitalWrite(PUMP2_PIN, state == State::PUMP2 ? 0 : 1); // relay driver is active low
+    }
+    return moving;
+  }
+  
+
+  static const char* state2str(State state)
+  {
+    switch(state)
+    {
+    case State::IDLE: return "IDLE";
+    case State::PUMP1: return "PUMP1";
+    case State::PUMP2: return "PUMP2";
+    case State::REST: return "REST";
+    }
+    return "????";
+  }
+
+private:  
+  State mState{State::IDLE};
+  
+} stateMachine;
+
+
 
 void outputState()
 {
@@ -194,15 +304,7 @@ void outputState()
   Serial.print(", Vcc:");Serial.print(readVcc());
   Serial.print(", Temp:");Serial.print(temphum.temp);
   Serial.print(", RH:");Serial.print(temphum.rh);
-  if(!powerok || charging || pumping)
-  {
-    Serial.print(", State:\"");
-    if(!powerok) Serial.print("LowPow");
-    if(charging) Serial.print("Charging");
-    if(pumping) Serial.print("Pumping");
-    Serial.print("\"");
-  }
-  Serial.print(", T:");Serial.print(timer);
+  Serial.print(", State:");Serial.print(state2str(state));
   Serial.print(", TS:");Serial.print(millis()/1000);
   Serial.print("}");
   Serial.println();  
@@ -224,8 +326,7 @@ void help()
   Serial.println("u<state update period seconds>");
   Serial.println("x1 go pump on");
   Serial.println("x2 go pump off");
-  Serial.println("x3 go charge on");
-  Serial.println("x4 go charge off");
+  Serial.println("x3 go pumps off");
 }
 
 // commands are in form <CmdChar><number(digits)><CR>
@@ -314,6 +415,8 @@ bool executeCmd(char cmd, int par)
   return res;
 }
 
+
+
 bool checkSerial()
 {
   static struct {
@@ -334,7 +437,7 @@ bool checkSerial()
   {
     ret = true;
     char ch = Serial.read();
-    if( ch == 13 ) // command terminated - execute
+    if( ch == 13 ) // command terminated -> execute
     {
       executeCmd(state.cmd, state.par);
       state.reset();
@@ -343,147 +446,33 @@ bool checkSerial()
     {
       // ignore
     }
+    // have a command and got a digit?
     else if( state.cmd > 0 && isDigit(ch) )
     {
       state.inPar = true;
       state.par *= 10;
       state.par += ch - '0';
     }
+    // collecting paramteter or got a digit at start?
     else if( state.inPar || state.cmd == 0 && isDigit(ch) ) // got something else? scrap the whole thing
     {
       Serial.print("unexpected input: ");Serial.println(ch);
       state.reset();
     }
+    // use ch as command
     else if( state.cmd == 0 )
     {
       state.cmd = ch;
     }
-    else
+    else // got something else in command?
     {
-      Serial.print("unexpected state: ");Serial.println(ch);
+      Serial.print("unexpected input: ");Serial.println(ch);
       state.reset();
     }
   }
   return ret;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// decide what to do about battery state
-void checkBattery()
-{
-  // update battery state
-  batteryMV = readBattery();
-  
-  if( batteryMV < CONFIG.batChargeMV )
-  {
-    charging = true;
-  }
-  else if( batteryMV > CONFIG.batMaxMV )
-  {
-    charging = false;
-  }
-
-  if(forceGo == GO_CHARGE_ON)
-  {
-    charging = true;
-    forceGo = GO_NOTHING;
-  }  
-  if(forceGo == GO_CHARGE_OFF)
-  {
-    charging = false;
-    forceGo = GO_NOTHING;
-  }  
-  
-  if( batteryMV < CONFIG.batMinMV )
-  {
-    powerok  = false;
-    pumping = false;
-    if(timer==0)
-    {
-      beep(200,100);
-      beep(200,100);
-    }
-  }
-  else if( !powerok && batteryMV > CONFIG.batChargeMV )
-  {
-    powerok = true;
-  }  
-}
-
-void setSolarCharging(bool on)
-{
-  digitalWrite(SOLAR_PIN, charging? 1 : 0); // active high
-  digitalWrite(SOLARN_PIN, charging? 0 : 1); // relay driver is active low  
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// decide what to do about pumping
-void checkPumping()
-{  
-  // update sensor state
-  if(forceGo == GO_PUMP_ON)
-  {
-     sensorValue = 0;
-     forceGo = GO_NOTHING;
-  }
-  else if(forceGo == GO_PUMP_OFF)
-  {
-     if(pumping)
-     {
-       timer = 0;
-     }
-  }
-  else
-  {
-    sensorValue = readSensor();
-  }
-  
-  // check for hard override (sensor shorted)
-  if( sensorValue < 10 )
-  {
-    // sensor forcefully grounded -> reset the timer and that will turn the pump on below
-    setTimer(0);
-    digitalWrite(LED_PIN,1);
-    beep(1000);
-  }
-  
-  // if timer expired do: pump off, rest or check sensor
-  if( timer <= 0 )
-  {
-    auto t = CONFIG.samplingTime;
-    if( pumping )
-    {
-      Serial.println("PUMP OFF!");
-      pumping = false;
-      t = CONFIG.pumpRestTime;
-      outputState();
-    }
-    else // not pumping so start checking sensor
-    {
-      if( sensorValue < CONFIG.pumpTreshold )
-      {
-        if( powerok )
-        {
-          Serial.println("PUMP ON!");
-          pumping = true;
-          t = CONFIG.pumpOnTime;
-          outputState();
-          beep(50,50);
-          beep(50,50);
-          beep(50,50);
-        }
-        else
-        {
-          Serial.println("POWER LOW, CANNOT PUMP!");
-          beep(2000);
-        }
-      }
-    }
-    setTimer(t);
-  }
-  setSolarCharging(charging); // relay driver is active low
-  digitalWrite(PUMP_PIN, pumping ? 0 : 1); // relay driver is active low  
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -512,10 +501,8 @@ void setup()
   outputCONFIG();
   digitalWrite(PUMP_PIN, 1);
   pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(SOLAR_PIN, 0);
-  pinMode(SOLAR_PIN, OUTPUT);
-  digitalWrite(SOLARN_PIN, 1);
-  pinMode(SOLARN_PIN, OUTPUT);
+  digitalWrite(PUMP2_PIN, 1);
+  pinMode(PUMP2_PIN, OUTPUT);
   beep(200);
   Serial.println("Ready!");
 }
@@ -525,7 +512,6 @@ void setup()
 void loop()
 {
   bool hadInput = checkSerial();
-  checkBattery();
   checkPumping();
   temphum = readTempHum();
   if(!hadInput)
