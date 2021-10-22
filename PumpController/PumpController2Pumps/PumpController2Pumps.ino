@@ -1,14 +1,13 @@
 #include <EEPROM.h>
 #include <dht11pp.h>
 
-// water pump controller, shore powered and 2 pumps
-// also suports temp/hum via DHT device
+// A water pump controller, single water sensonr, battery and shore powered with 2 pumps.
+// Also suports humidity/temp via DHT device,
 
-// A0 is water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
-// A1 is battery voltage via a ~1:10 divider
+// A0 is the water sensor (two electrodes between ground and A0 with A0 pulled up to VCC via 200KOhm)
+// A1 is the battery voltage via a ~1:10 divider
 
-// D 4/5/6/7 are relays (zero-active): D4 is pump 1 (active low); D5 is pump 2
-// D8 is solar panel via MOSFET solid state relay (active high) *** unused
+// D 4/5/6/7 are relays (zero-active): D4 is pump 1 (active low); D5 is pump 2; D6 is charging relay (active low)
 
 // D12 is DHT device
 
@@ -33,9 +32,9 @@ typedef struct ConfigData
   uint16_t batMaxMV{14500}; // max mV (stops charging)
   uint16_t batNomMV{13000}; // nominal mV (start charging below)
   uint16_t batFloMV{13600}; // float mV (after reaching Max idling got to float)
-  uint16_t pumpTreshold{450}; // water sense treshold (lower reading means water is present)
-  uint16_t pump1OnTime{30}; // seconds to turn the pump on
-  uint16_t pump2OnTime{30}; // seconds to turn the pump on
+  uint16_t pumpTreshold{700}; // water sense treshold (lower reading means water is present)
+  uint16_t pump1OnTime{20}; // seconds to turn the pump on
+  uint16_t pump2OnTime{20}; // seconds to turn the pump on
   uint16_t pumpRestTime{30}; // time between pump can go on
   uint16_t stateUpdateTime{10}; // period to output state to Serial
 };
@@ -80,15 +79,15 @@ public:
 
   void dump()
   {
-    Serial.print("batMV: ");Serial.println(mConfig.batMV);
-    Serial.print("batDAC: ");Serial.println(mConfig.batDAC);
-    Serial.print("batMaxMV: ");Serial.println(mConfig.batMaxMV);
-    Serial.print("batMinMV: ");Serial.println(mConfig.batMinMV);
-    Serial.print("batNomMV: ");Serial.println(mConfig.batNomMV);
-    Serial.print("batFloMV: ");Serial.println(mConfig.batFloMV);
+    Serial.print("batMV       : ");Serial.println(mConfig.batMV);
+    Serial.print("batDAC      : ");Serial.println(mConfig.batDAC);
+    Serial.print("batMaxMV    : ");Serial.println(mConfig.batMaxMV);
+    Serial.print("batMinMV    : ");Serial.println(mConfig.batMinMV);
+    Serial.print("batNomMV    : ");Serial.println(mConfig.batNomMV);
+    Serial.print("batFloMV    : ");Serial.println(mConfig.batFloMV);
     Serial.print("pumpTreshold: ");Serial.println(mConfig.pumpTreshold);
-    Serial.print("pump1OnTime: ");Serial.println(mConfig.pump1OnTime);
-    Serial.print("pump2OnTime: ");Serial.println(mConfig.pump2OnTime);
+    Serial.print("pump1OnTime : ");Serial.println(mConfig.pump1OnTime);
+    Serial.print("pump2OnTime : ");Serial.println(mConfig.pump2OnTime);
     Serial.print("pumpRestTime: ");Serial.println(mConfig.pumpRestTime);
     Serial.print("stateUpdateTime: ");Serial.println(mConfig.stateUpdateTime);
   }
@@ -227,7 +226,7 @@ class ChargingStateMachine
 {
 public:
   
-  enum class State { NORMAL, RECOVERY, FLOAT, REST };
+  enum class State { NORMAL, RECOVERY, FLOAT, REST, ERROR };
   
   State currentState() { return mState; }
   
@@ -270,23 +269,26 @@ private:
   {
     auto nextState = mState;
     auto batteryMV = readBatteryMV();
-    switch(mState)
-    {      
-      case State::NORMAL: // charging on all the time until batMax is reached; normal operating mode (DISCHARGE cycling)
-        if(batteryMV >= config.data().batMaxMV) nextState = State::REST;
-        break;
-      case State::RECOVERY: // full discharge - charge until batNom is reached but do all allow discharge
-        if(batteryMV >= config.data().batNomMV) nextState = State::NORMAL;
-        break;      
-      case State::FLOAT:
-        if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
-        else if(batteryMV > config.data().batFloMV) nextState = State::REST; // out of float when discharge is happening
-        break;      
-      case State::REST:
-        if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
-        if(batteryMV < config.data().batFloMV - 500/*mV*/) nextState = State::FLOAT; // back to float charging as we dropped 200mV
-        break;      
-    }
+    if(batteryMV<100)
+      nextState = State::ERROR; // prevent overcharge in case battery sensor fails
+    else
+      switch(mState)
+      {      
+        case State::NORMAL: // charging on all the time until batMax is reached; normal operating mode (DISCHARGE cycling)        
+          if(batteryMV >= config.data().batMaxMV) nextState = State::REST;
+          break;
+        case State::RECOVERY: // full discharge - charge until batNom is reached but do all allow discharge
+          if(batteryMV >= config.data().batNomMV) nextState = State::NORMAL;
+          break;      
+        case State::FLOAT: // float charging - up to float Volts can switch to is from REST (when no strong dischargin was happening)
+          if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
+          else if(batteryMV > config.data().batMaxMV) nextState = State::REST; // out of float when discharge is happening
+          break;      
+        case State::REST: // no charging, resting
+          if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
+          else if(batteryMV < config.data().batFloMV) nextState = State::FLOAT; // back to float charging as we dropped some small V
+          break;      
+      }
     return nextState;
   }
 
@@ -299,8 +301,18 @@ private:
 
   void outputs()
   {
-    // outputs
-    digitalWrite( CHARGE_PIN, mState != State::REST ? 0 : 1); // active low
+    auto charge = false;
+    switch(mState)
+    {
+      case State::NORMAL:
+      case State::FLOAT:
+      case State::RECOVERY:
+        charge = true;
+        break;
+      default:
+        charge = false;
+    }
+    digitalWrite( CHARGE_PIN, charge ? 0 : 1); // this relay is active low
   }
   
   static const char* state2str(State state)
@@ -315,6 +327,7 @@ private:
     case State::RECOVERY: return "RECOVERY"; // recovering from deep discharge (leave me alone until reaching NOMinal voltage)
     case State::REST: return "REST"; // recovering from deep discharge (leave me alone until reaching NOMinal voltage)
     case State::FLOAT: return "FLOAT"; // battery in float charge state (charging only to 13.8V)
+    case State::ERROR: return "ERROR"; // charging in error (cannot read battery voltage)
     }
     return "????";
   }
@@ -449,8 +462,6 @@ private:
 
 MYDHT::Result temphum{};
 
-int stateUpdateTime = 0;
-
 void outputState()
 {
   temphum = readTempHum();
@@ -474,15 +485,15 @@ void outputState()
 
 void help()
 {
-  Serial.println("t default the configuration and store");
+  Serial.println("z default the configuration and store");
   Serial.println("b<battery mV as measured> calibration");
-  Serial.println("i<battery min mV>");  
-  Serial.println("a<battery max mV>");
-  Serial.println("f<battery flo mV>");
+  Serial.println("m<battery min mV>");  
   Serial.println("n<battery nom mV>");
-  Serial.println("p<pump treshhold DAC counts>");
-  Serial.println("o<pump1 on time seconds>");
-  Serial.println("l<pump2 on time seconds>");
+  Serial.println("k<battery max mV>");
+  Serial.println("f<battery flo mV>");
+  Serial.println("t<pump treshhold DAC counts>");
+  Serial.println("p<pump1 on time seconds>");
+  Serial.println("o<pump2 on time seconds>");
   Serial.println("r<pump rest time seconds >");
   Serial.println("u<state update/dump period seconds>");
   Serial.println("x0 go pumps off");
@@ -490,18 +501,20 @@ void help()
   Serial.println("x2 go pump off");
   Serial.println("x2 go pump off");
   Serial.println("x9 restart from CHECK");
+  Serial.println("d<SPP> digital write PP=pin number, S=state: 1-write 1; 2-write 0, 3-read, 4-switch into input");
+  Serial.println("a<PP> analog read");
 }
 
 // commands are in form <CmdChar><number(digits)><CR>
 
-bool executeCmd(char cmd, int par)
+bool configCommand(char cmd, int par)
 {
-  bool res = false;
-  Serial.print("cmd ");Serial.print(cmd);Serial.print(' ');Serial.println(par);
+  if( par < 0 ) return false;
+  
   bool storeConfig = false;
   switch(cmd)
   {
-    case 't':
+    case 'z':
       config.reset();
       storeConfig = true;
       break;
@@ -512,31 +525,31 @@ bool executeCmd(char cmd, int par)
       config.data().batMV = par;
       storeConfig = true;
       break;
-    case 'i':
+    case 'm':
       config.data().batMinMV = par;
-      storeConfig = true;
-      break;
-    case 'a':
-      config.data().batMaxMV = par;
       storeConfig = true;
       break;
     case 'n':
       config.data().batNomMV = par;
       storeConfig = true;
       break;        
+    case 'k':
+      config.data().batMaxMV = par;
+      storeConfig = true;
+      break;
     case 'f':
       config.data().batFloMV = par;
       storeConfig = true;
       break;        
-    case 'p':
+    case 't':
       config.data().pumpTreshold = par;
       storeConfig = true;
       break;
-    case 'o':
+    case 'p':
       config.data().pump1OnTime = par;
       storeConfig = true;
       break;
-    case 'l':
+    case 'o':
       config.data().pump2OnTime = par;
       storeConfig = true;
       break;
@@ -549,7 +562,67 @@ bool executeCmd(char cmd, int par)
       storeConfig = true;
       break;
   }
-  if( storeConfig ) 
+  return storeConfig;  
+}
+
+void pinOperation(int pn, int state)
+{
+  switch(state)
+  {
+    case 1: digitalWrite( pn, 1 ); break;
+    case 2: digitalWrite( pn, 0 ); break;
+    case 3: Serial.println(digitalRead(pn));break;
+    case 4: pinMode( pn, INPUT ); Serial.println("switched into input"); break;
+  }
+}
+
+bool goOperation(int par)
+{
+  Serial.print("x==> "); Serial.println(par);
+  switch(par)
+  {
+    case 0: forceGo = GO::PUMPS_OFF; return true; // x0
+    case 1: forceGo = GO::PUMP1_ON; return true; // x1
+    case 2: forceGo = GO::PUMP2_ON; return true; // x2
+    case 9: forceGo = GO::CHECK; return true; // x9
+  }
+  return false;
+}
+
+bool normalCommand(char cmd, int par)
+{
+  bool res = true;
+  switch(cmd)
+  {
+  case 'a':
+    Serial.println(analogRead(par));
+    break;
+  case 'd':
+    pinOperation(par % 100, par / 100);
+    break;
+  case 'x': // go
+    res = goOperation(par);
+    break;
+  case 0:
+    outputState();
+    break;
+  case '?':
+    config.dump();
+    Serial.println();
+    help();
+    break;
+  default:
+    res = false;
+    break;
+  }
+  return res;
+}
+
+bool executeCmd(char cmd, int par)
+{
+  bool res = false;
+  Serial.print("cmd ");Serial.print(cmd);Serial.print(' ');Serial.println(par);
+  if( configCommand(cmd, par) ) 
   {
     config.dump();
     config.store();
@@ -557,31 +630,12 @@ bool executeCmd(char cmd, int par)
   }
   else // if(!storeConfig) // there was not correct config update cmd
   {
-    switch(cmd)
-    {
-    case 'x': // go
-      switch(par)
-      {
-        case 0: forceGo = GO::PUMPS_OFF; break; // x0
-        case 1: forceGo = GO::PUMP1_ON; break; // x1
-        case 2: forceGo = GO::PUMP2_ON; break; // x2
-        case 9: forceGo = GO::CHECK; break; // x9
-        default:
-              res = false;
-      }
-      break;
-    case 0:
-      outputState();
-      break;
-    case '?':
-      config.dump();
-      help();
-      break;
-    default:
-      Serial.println("Invalid command");
-      help();
-      break;
-    }
+    res = normalCommand(cmd, par);
+  }
+  if(!res)
+  {
+    Serial.println("Invalid command");
+    help();
   }
   return res;
 }
@@ -598,7 +652,7 @@ bool checkSerial()
     void reset() {
       cmd = 0;
       inPar = false;
-      par = 0;
+      par = -1;
     }
   } state{};
 
@@ -620,6 +674,7 @@ bool checkSerial()
     // have a command and got a digit?
     else if( state.cmd > 0 && isDigit(ch) )
     {
+      if( state.par < 0 ) state.par = 0;
       state.inPar = true;
       state.par *= 10;
       state.par += ch - '0';
@@ -648,16 +703,6 @@ bool checkSerial()
 
 void setup()
 {  
-  // configure pins
-  digitalWrite(PUMP1_PIN, 1);
-  pinMode(PUMP1_PIN, OUTPUT);
-  digitalWrite(PUMP2_PIN, 1);
-  pinMode(PUMP2_PIN, OUTPUT);
-  digitalWrite(CHARGE_PIN, 1);
-  pinMode(CHARGE_PIN, OUTPUT);
-  digitalWrite(BEEP_PIN, 0);
-  pinMode(BEEP_PIN, OUTPUT);
-
   // after turnon the ESP may spew its output for a while to the serial input so delay
   delay(1000);  
   // begin the serial communication now
@@ -666,16 +711,20 @@ void setup()
   Serial.println();
   Serial.print("Pump controller (2 pump version) ");
 
+  // configure pins
+  digitalWrite(BEEP_PIN, 0);
+  pinMode(BEEP_PIN, OUTPUT);
+
   // 5 x beep to signal starting
   for(auto n = 0; n < 5; ++n) {
     beep(50);
     delay(1000);
     Serial.print('.');
   }
-  // throw away the serial input if any
+  // throw away the serial input if any for some time
   while(Serial.available()) { Serial.read(); delay(1); }
   
-  Serial.println();
+  Serial.println();  
 
   // load or default configuration
   if( !config.load() )
@@ -689,6 +738,13 @@ void setup()
     Serial.println("EEPROM configuation restored.");
   }
   config.dump();
+
+  digitalWrite(PUMP1_PIN, 1);
+  pinMode(PUMP1_PIN, OUTPUT);
+  digitalWrite(PUMP2_PIN, 1);
+  pinMode(PUMP2_PIN, OUTPUT);
+  digitalWrite(CHARGE_PIN, 1);
+  pinMode(CHARGE_PIN, OUTPUT);
   
   beep(200);
   Serial.println("Ready!");
@@ -696,8 +752,10 @@ void setup()
 
 ////////////////////////////////////////////////////////////////////////////////
 
+int stateUpdateTime = 0;
+
 void loop()
-{
+{  
   bool hadInput = checkSerial();
   if(!hadInput)
   {
