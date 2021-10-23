@@ -1,6 +1,3 @@
-#include <EEPROM.h>
-#include <dht11pp.h>
-
 // A water pump controller, single water sensonr, battery and shore powered with 2 pumps.
 // Also suports humidity/temp via DHT device,
 
@@ -19,6 +16,10 @@
 #define BEEP_PIN 11
 #define DHT_PIN 12
 
+#include <EEPROM.h>
+#include <dht11pp.h>
+
+const char build_timestamp[] = __DATE__ " " __TIME__;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Configuration/EEPROM
@@ -215,9 +216,9 @@ class Timer
 public:
   void reset() { mCount = 0; }
   void tick() { mCount++; }
-  int count() { return mCount; }
+  unsigned count() { return mCount; }
 private:
-  int  mCount{0};
+  unsigned mCount{0};
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -232,7 +233,7 @@ public:
   
   const char* currentStateStr() { return state2str(mState); }
   
-  int timerCount() { return mTimer.count(); }
+  unsigned timerCount() { return mTimer.count(); }
   
   bool powerGood() { return mState != State::RECOVERY; }
 
@@ -349,7 +350,7 @@ public:
   
   const char* currentStateStr() { return state2str(mState); }
   
-  int timerCount() { return mTimer.count(); }
+  unsigned timerCount() { return mTimer.count(); }
 
   void update()
   {
@@ -485,6 +486,7 @@ void outputState()
 
 void help()
 {
+  Serial.print("build: ");Serial.println(build_timestamp);
   Serial.println("z default the configuration and store");
   Serial.println("b<battery mV as measured> calibration");
   Serial.println("m<battery min mV>");  
@@ -710,6 +712,8 @@ void setup()
   
   Serial.println();
   Serial.print("Pump controller (2 pump version) ");
+  Serial.print("build: ");
+  Serial.print(build_timestamp);
 
   // configure pins
   digitalWrite(BEEP_PIN, 0);
