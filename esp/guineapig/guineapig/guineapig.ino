@@ -1,11 +1,13 @@
-#include <Arduino.h>
+#include <dummy.h>
+
+#include <dummy.h>
+
 #include <Esp.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <time.h>
 
 #include <Scheduler.h>
 #include <Task.h>
@@ -96,7 +98,7 @@ void rest_pin() {
   }
 }
 
-// crude A2D converter to infer resistance or voltage by change/discharge time 
+// crude A2D converter to infer resistance or voltage by charge/discharge time 
 // assumes a capacitor it connected to a pin to ground
 // toggles the pin to charge cap and then measures time it takes it to discharge
 // returns this time in us
