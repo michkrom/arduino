@@ -17,7 +17,7 @@
 #define DHT_PIN 12
 
 #include <EEPROM.h>
-#include <dht11pp.h>
+#include "libraries/DHT/dht11pp.h"
 
 const char build_timestamp[] = __DATE__ " " __TIME__;
 
@@ -30,9 +30,9 @@ typedef struct ConfigData
   uint16_t batMV{12860}; // measured 12.86V--> 258 DAC COUNTS (this may be temp dependent!)
   uint16_t batDAC{258}; // corresponding DAC for measured mV
   uint16_t batMinMV{8000}; // min mV (critical baterry level - stop anything else and recover)
-  uint16_t batMaxMV{14500}; // max mV (stops charging)
-  uint16_t batNomMV{13000}; // nominal mV (start charging below)
-  uint16_t batFloMV{13600}; // float mV (after reaching Max idling got to float)
+  uint16_t batMaxMV{14500}; // max mV (target in recovery, and max absolute when charging is unconditionally off)
+  uint16_t batNomMV{12000}; // nominal mV (start charging below end at float unless recovering)
+  uint16_t batFloMV{13600}; // float mV (the normal up-to voltage while charging)
   uint16_t pumpTreshold{700}; // water sense treshold (lower reading means water is present)
   uint16_t pump1OnTime{20}; // seconds to turn the pump on
   uint16_t pump2OnTime{20}; // seconds to turn the pump on
@@ -82,15 +82,15 @@ public:
   {
     Serial.print("batMV       : ");Serial.println(mConfig.batMV);
     Serial.print("batDAC      : ");Serial.println(mConfig.batDAC);
-    Serial.print("batMaxMV    : ");Serial.println(mConfig.batMaxMV);
     Serial.print("batMinMV    : ");Serial.println(mConfig.batMinMV);
     Serial.print("batNomMV    : ");Serial.println(mConfig.batNomMV);
     Serial.print("batFloMV    : ");Serial.println(mConfig.batFloMV);
+    Serial.print("batMaxMV    : ");Serial.println(mConfig.batMaxMV);
     Serial.print("pumpTreshold: ");Serial.println(mConfig.pumpTreshold);
     Serial.print("pump1OnTime : ");Serial.println(mConfig.pump1OnTime);
     Serial.print("pump2OnTime : ");Serial.println(mConfig.pump2OnTime);
     Serial.print("pumpRestTime: ");Serial.println(mConfig.pumpRestTime);
-    Serial.print("stateUpdateTime: ");Serial.println(mConfig.stateUpdateTime);
+    Serial.print("sUpdateTime : ");Serial.println(mConfig.stateUpdateTime);
   }
 
   ConfigData& data() { return mConfig; }
@@ -104,7 +104,7 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 // return Vcc in [mV] measured using internal reference 1.1V
 
-long readVccMV()
+uint16_t readVccMV()
 {
   // read 1.1V Vref against AVcc first
   ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1); 
@@ -125,34 +125,36 @@ long readVccMV()
   sum /= AVERAGECOUNT;
   
   auto result = 1126400L / sum; // Back-calculate AVcc in mV 
-  return result; 
+  return (uint16_t)result; 
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// battery [mV] (via resistor divider)
 
-int readBatteryMV()
-{
-  const int AVERAGECOUNT = 16;
+uint16_t analogReadAvg(const uint8_t pin, const uint8_t avgs)
+{  
   uint32_t sum = 0;
-  for(int i=0; i < AVERAGECOUNT; ++i)
-    sum += analogRead(A1);
-  sum /= AVERAGECOUNT;
-  auto batMV = (sum*config.data().batMV)/config.data().batDAC;
-  return (int)batMV;
+  for(uint8_t i=0; i < avgs; ++i)
+    sum += analogRead(pin);
+  sum /= avgs;
+  return uint16_t(sum);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// water sensor readout [dac counts]
+// battery [mV] (via resistor divider) on A1
 
-int readSensor()
+uint16_t readBatteryMV()
 {
-  const int AVERAGECOUNT = 16;
-  int32_t sum = 0;
-  for(int i=0; i < AVERAGECOUNT; ++i)
-    sum += analogRead(A0);
-  auto ret = (int16_t)(sum/AVERAGECOUNT);
-  return ret;
+  uint32_t read = analogReadAvg(A1, 64);
+  read = (read*config.data().batMV)/config.data().batDAC;
+  return read;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// water sensor readout [dac counts] on A0
+
+uint16_t readSensor()
+{
+  uint32_t read = analogReadAvg(A0, 64);
+  return uint16_t(read);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -169,7 +171,7 @@ MYDHT::Result readTempHum()
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void sleep1s()
+void sleep1sblink()
 {
   digitalWrite(LED_PIN,1);
   delay(500UL);
@@ -201,7 +203,8 @@ bool highWaterLevel()
     digitalWrite(LED_PIN,1);
     beep(1000);
     ret = true;
-  }  
+  }
+  // the lower the reading the less resistance there is inferring more water is over the sensor
   if( sensorValue < config.data().pumpTreshold )
   {
     ret = true;
@@ -227,93 +230,90 @@ class ChargingStateMachine
 {
 public:
   
-  enum class State { NORMAL, RECOVERY, FLOAT, REST, ERROR };
+  enum class State { RECOVERY, CHARGE, FLOAT, ERROR };
   
-  State currentState() { return mState; }
+  State currentState() const { return mState; }
   
-  const char* currentStateStr() { return state2str(mState); }
+  const char* currentStateStr() const { return state2str(mState); }
   
-  unsigned timerCount() { return mTimer.count(); }
+  unsigned timerCount() const { return mTimer.count(); }
   
-  bool powerGood() { return mState != State::RECOVERY; }
+  bool powerGood() const { return mState == State::FLOAT || mState == State::CHARGE; }
 
-  void update()
+  bool update()
   {
-    State nextState = computeNextState();
+    bool changed = false;
+    auto batteryMV = readBatteryMV();
+    State nextState = computeNextState(batteryMV);
     if(nextState != currentState())
     {
+      changed = true;
       // log the change
       Serial.print("Charge ");
       Serial.print(state2str(mState));
+      Serial.print("==");
+      Serial.print(batteryMV);
       Serial.print("==>");
       Serial.print(state2str(nextState));
-      Serial.println();
-      
+      Serial.println();      
       moveTo(nextState);
-      
-      // any state change resets the timer to zero
-      forceGo = GO::NOTHING;
+      mTimer.reset();
     }
     else
     {
       // no change - keep ticking
       mTimer.tick();
     }
-
     // adjust outputs (in Mealy state machine output may have logic that depends on input so must call it always)
-    outputs();        
+    outputs();
+    return changed;
   }
   
 private:
 
-  State computeNextState()
+  void moveTo(State state) { mState = state; }
+
+
+  // RECOVERY -> charging up to max, use disabled
+  // CHARGE -> charging up to float, use OK
+  // REST   -> not charging, use ok, got CHARGE when below nom
+  State computeNextState(uint16_t batteryMV) const
   {
     auto nextState = mState;
-    auto batteryMV = readBatteryMV();
     if(batteryMV<100)
       nextState = State::ERROR; // prevent overcharge in case battery sensor fails
-    else
+    else if(batteryMV >= config.data().batMaxMV)
+      nextState = State::FLOAT; // reached max now FLOAT
+    else if(batteryMV < config.data().batMinMV)
+      nextState = State::RECOVERY; // recovery forcess reaching full charge and no work (recovery from max discharge)
+    else 
+    {
       switch(mState)
-      {      
-        case State::NORMAL: // charging on all the time until batMax is reached; normal operating mode (DISCHARGE cycling)        
-          if(batteryMV >= config.data().batMaxMV) nextState = State::REST;
+      {
+        case State::CHARGE: // float charging - up to float Volts can switch to is from REST (when no strong dischargin was happening)
+          if(batteryMV > config.data().batFloMV) nextState = State::FLOAT;
           break;
-        case State::RECOVERY: // full discharge - charge until batNom is reached but do all allow discharge
-          if(batteryMV >= config.data().batNomMV) nextState = State::NORMAL;
-          break;      
-        case State::FLOAT: // float charging - up to float Volts can switch to is from REST (when no strong dischargin was happening)
-          if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
-          else if(batteryMV > config.data().batMaxMV) nextState = State::REST; // out of float when discharge is happening
-          break;      
-        case State::REST: // no charging, resting
-          if(batteryMV < config.data().batNomMV) nextState = State::NORMAL; // apparently we are discharging - switch to NORMAL
-          else if(batteryMV < config.data().batFloMV) nextState = State::FLOAT; // back to float charging as we dropped some small V
-          break;      
+        case State::FLOAT:
+          if(batteryMV < config.data().batNomMV) nextState = State::CHARGE;
+          break;          
       }
+    }
     return nextState;
   }
 
-  void moveTo(State state)
-  {
-    mState = state;
-    // start measuring time in new state from zero
-    mTimer.reset();
-  }
-
-  void outputs()
+  void outputs() const
   {
     auto charge = false;
     switch(mState)
     {
-      case State::NORMAL:
-      case State::FLOAT:
+      case State::CHARGE:
       case State::RECOVERY:
         charge = true;
         break;
       default:
         charge = false;
     }
-    digitalWrite( CHARGE_PIN, charge ? 0 : 1); // this relay is active low
+    digitalWrite(CHARGE_PIN, charge ? 0 : 1); // this relay is active low
   }
   
   static const char* state2str(State state)
@@ -324,16 +324,15 @@ private:
     // 
     switch(state)
     {
-    case State::NORMAL: return "NORMAL"; // battery in normal operating state (charge on) 
-    case State::RECOVERY: return "RECOVERY"; // recovering from deep discharge (leave me alone until reaching NOMinal voltage)
-    case State::REST: return "REST"; // recovering from deep discharge (leave me alone until reaching NOMinal voltage)
-    case State::FLOAT: return "FLOAT"; // battery in float charge state (charging only to 13.8V)
-    case State::ERROR: return "ERROR"; // charging in error (cannot read battery voltage)
+    case State::CHARGE: return "CHA";   // battery in normal operating state (charge on, work ok) 
+    case State::RECOVERY: return "REC"; // recovering from deep discharge (leave me alone until reaching NOMinal voltage)
+    case State::FLOAT: return "FLO";     // not changing, all good for work
+    case State::ERROR: return "ERROR";  // charging in error (cannot read battery voltage)
     }
     return "????";
   }
   
-  State mState{State::NORMAL};
+  State mState{State::CHARGE};
   Timer mTimer;
     
 } chargingStateMachine;
@@ -344,19 +343,22 @@ private:
 class PumpStateMachine
 {
 public:  
-  enum class State { CHECK, PUMP1, PUMP2, REST };
+  enum class State { CHECK, PUMP1, XPUMP1, PUMP2, REST }; // XPUMP1 transitions to REST while PUMP1 (notmal) transitions to PUMP2
   
-  State currentState() { return mState; }
+  State currentState() const { return mState; }
   
-  const char* currentStateStr() { return state2str(mState); }
+  const char* currentStateStr() const { return state2str(mState); }
   
-  unsigned timerCount() { return mTimer.count(); }
+  unsigned timerCount() const { return mTimer.count(); }
 
-  void update()
+  bool update()
   {
+    bool changed = false;
+
     State nextState = computeNextState();
     if(nextState != currentState())
     {
+      changed = true;
       // short beep when changing state
       beep(20);
       
@@ -365,12 +367,11 @@ public:
       Serial.print(state2str(mState));
       Serial.print("==>");
       Serial.print(state2str(nextState));
-      Serial.println();
-      
-      moveTo(nextState);
-            
-      // any state change resets the timer to zero
-      forceGo = GO::NOTHING;
+      Serial.println();      
+      moveTo(nextState);      
+      // start measuring time in new state from zero
+      mTimer.reset();
+
     }
     else
     {
@@ -379,74 +380,74 @@ public:
     }
 
     // adjust outputs (in Mealy state machine output may have logic that depends on input so must call it always)
-    outputs();    
+    outputs();
+    forceGo = GO::NOTHING;
+
+    return changed;
   }
 
 private:
 
   // compute next state given forceGo, timer and sensors
-  State computeNextState()
+  State computeNextState() const
   {
+    if( !chargingStateMachine.powerGood() )
+    {
+      return State::REST;
+    }
+
     State nextState = mState;
     // first apply external command
     switch(forceGo)
     {
-      case GO::PUMP1_ON: nextState = State::PUMP1; break;
-      case GO::PUMP2_ON: nextState = State::PUMP2; break;
+      case GO::PUMP1_ON: nextState = State::XPUMP1; break;
+      case GO::PUMP2_ON: nextState = State::PUMP2;  break;
       case GO::PUMPS_OFF: nextState = State::REST; break;
       case GO::CHECK: nextState = State::CHECK; break;
-    }
-    // if no command, do normal state change
-    if(forceGo == GO::NOTHING)
-    {
-      if( !chargingStateMachine.powerGood() )
-      {
-        nextState = State::REST;
-      } else switch(mState)
-      {
-      case State::CHECK:
-        if( highWaterLevel() ) 
-          nextState = config.data().pump1OnTime > 0 ? State::PUMP1 : State::PUMP2;
-        break;
-      case State::PUMP1:
-        if(mTimer.count() > config.data().pump1OnTime)
-          nextState = config.data().pump2OnTime > 0 ? State::PUMP2 : State::REST;
-        break;
-      case State::PUMP2:
-        if(mTimer.count() > config.data().pump2OnTime) 
-          nextState = State::REST;
-        break;
-      case State::REST:
-        // if idle battery voltage dropped below battChargeMV - remain in REST
-        // otherwise after 'resting' go back to checking
-        if( chargingStateMachine.powerGood() &&
-            mTimer.count() > config.data().pumpRestTime)
-          nextState = State::CHECK;
-        break;
-      }
+      default: // GO::NOTHING
+        switch(mState)
+        {
+        case State::CHECK:
+          if( highWaterLevel() ) 
+            nextState = State::PUMP1;
+          break;
+        case State::XPUMP1:
+        case State::PUMP1:
+          if(mTimer.count() > config.data().pump1OnTime)
+          {
+            nextState = mState == State::XPUMP1 ? State::REST : State::PUMP2;
+          }
+          break;
+        case State::PUMP2:
+          if(mTimer.count() > config.data().pump2OnTime) 
+            nextState = State::REST;
+          break;
+        case State::REST:
+          // rest until timeout & battery is good again
+          if( chargingStateMachine.powerGood() &&
+              mTimer.count() > config.data().pumpRestTime)
+            nextState = State::CHECK;
+          break;
+        }
     }
     return nextState;
   }
 
-  void outputs()
+  void outputs() const
   {
     // adjust pump pins - must be executed always to turn off pumps
-    digitalWrite(PUMP1_PIN, mState == State::PUMP1 ? 0 : 1);
+    digitalWrite(PUMP1_PIN, mState == State::PUMP1 || mState == State::XPUMP1 ? 0 : 1);
     digitalWrite(PUMP2_PIN, mState == State::PUMP2 ? 0 : 1);    
   }
 
-  void moveTo(State state)
-  {
-      mState = state;
-      // start measuring time in new state from zero
-      mTimer.reset();
-  }
+  void moveTo(State state) { mState = state; }
 
   static const char* state2str(State state)
   {
     switch(state)
     {
     case State::CHECK: return "CHECK";
+    case State::XPUMP1: return "XPUMP1";
     case State::PUMP1: return "PUMP1";
     case State::PUMP2: return "PUMP2";
     case State::REST: return "REST";
@@ -463,19 +464,19 @@ private:
 
 MYDHT::Result temphum{};
 
-void outputState()
+void printAllState()
 {
   temphum = readTempHum();
   Serial.print("{");
   Serial.print("Dsen:");Serial.print(readSensor());
   Serial.print(", Vbat:");Serial.print(readBatteryMV());
-  Serial.print(", Vcc:");Serial.print(readVccMV());
-  Serial.print(", Temp:");Serial.print(temphum.temp);
-  Serial.print(", RH:");Serial.print(temphum.rh);
-  Serial.print(", PState:");Serial.print(pumpStateMachine.currentStateStr());
+  Serial.print(", ");Serial.print(pumpStateMachine.currentStateStr());
   Serial.print("/");Serial.print(pumpStateMachine.timerCount());
-  Serial.print(", CState:");Serial.print(chargingStateMachine.currentStateStr());
+  Serial.print(", ");Serial.print(chargingStateMachine.currentStateStr());
   Serial.print("/");Serial.print(chargingStateMachine.timerCount());
+  Serial.print(", Vcc:");Serial.print(readVccMV());
+  Serial.print(", TP:");Serial.print(temphum.temp);
+  Serial.print(", RH:");Serial.print(temphum.rh);
   Serial.print(", TS:");Serial.print(millis()/1000);
   Serial.print("}");
   Serial.println();  
@@ -487,7 +488,8 @@ void outputState()
 void help()
 {
   Serial.print("build: ");Serial.println(build_timestamp);
-  Serial.println("z default the configuration and store");
+  Serial.println("command format: <char><number><CR>");
+  Serial.println("z default the configuration");
   Serial.println("b<battery mV as measured> calibration");
   Serial.println("m<battery min mV>");  
   Serial.println("n<battery nom mV>");
@@ -498,73 +500,65 @@ void help()
   Serial.println("o<pump2 on time seconds>");
   Serial.println("r<pump rest time seconds >");
   Serial.println("u<state update/dump period seconds>");
-  Serial.println("x0 go pumps off");
-  Serial.println("x1 go pump on");
-  Serial.println("x2 go pump off");
-  Serial.println("x2 go pump off");
-  Serial.println("x9 restart from CHECK");
-  Serial.println("d<SPP> digital write PP=pin number, S=state: 1-write 1; 2-write 0, 3-read, 4-switch into input");
+  Serial.println("x0 pumps off, x1 pump1, x2 pump2, x9 restart CHECK");
+  Serial.println("d<SPP> digital write PP=pin number, S=state: 1-wr 1; 2-wr 0, 3-rd, 4-make input");
   Serial.println("a<PP> analog read");
 }
 
 // commands are in form <CmdChar><number(digits)><CR>
 
-bool configCommand(char cmd, int par)
+bool configCommand(char cmd, uint16_t par)
 {
   if( par < 0 ) return false;
   
-  bool storeConfig = false;
+  bool storeConfig = true;
   switch(cmd)
   {
     case 'z':
       config.reset();
-      storeConfig = true;
       break;
     case 'b':
       config.data().batMV = 1;
       config.data().batDAC = 1;
       config.data().batDAC = readBatteryMV();
       config.data().batMV = par;
-      storeConfig = true;
       break;
     case 'm':
       config.data().batMinMV = par;
-      storeConfig = true;
       break;
     case 'n':
       config.data().batNomMV = par;
-      storeConfig = true;
       break;        
     case 'k':
       config.data().batMaxMV = par;
-      storeConfig = true;
       break;
     case 'f':
       config.data().batFloMV = par;
-      storeConfig = true;
       break;        
     case 't':
       config.data().pumpTreshold = par;
-      storeConfig = true;
       break;
     case 'p':
       config.data().pump1OnTime = par;
-      storeConfig = true;
       break;
     case 'o':
       config.data().pump2OnTime = par;
-      storeConfig = true;
       break;
     case 'r':
       config.data().pumpRestTime = par;
-      storeConfig = true;
       break;
     case 'u':
       config.data().stateUpdateTime = par;
-      storeConfig = true;
       break;
+    default:
+      storeConfig = false;
   }
-  return storeConfig;  
+  if(storeConfig) 
+  {
+    config.store();
+    config.dump();
+  }
+  return storeConfig;
 }
 
 void pinOperation(int pn, int state)
@@ -573,7 +567,7 @@ void pinOperation(int pn, int state)
   {
     case 1: digitalWrite( pn, 1 ); break;
     case 2: digitalWrite( pn, 0 ); break;
-    case 3: Serial.println(digitalRead(pn));break;
+    case 3: Serial.println(digitalRead(pn)); break;
     case 4: pinMode( pn, INPUT ); Serial.println("switched into input"); break;
   }
 }
@@ -602,17 +596,19 @@ bool normalCommand(char cmd, int par)
   case 'd':
     pinOperation(par % 100, par / 100);
     break;
-  case 'x': // go
+  case 'x':
     res = goOperation(par);
     break;
-  case 0:
-    outputState();
+  case 's':
+    printAllState();
+    break;
+  case 'c':
+    config.dump();
     break;
   case '?':
-    config.dump();
-    Serial.println();
     help();
     break;
+
   default:
     res = false;
     break;
@@ -620,28 +616,39 @@ bool normalCommand(char cmd, int par)
   return res;
 }
 
-bool executeCmd(char cmd, int par)
+static bool inputLocked = true;
+
+
+void executeCmd(char cmd, int par)
 {
-  bool res = false;
   Serial.print("cmd ");Serial.print(cmd);Serial.print(' ');Serial.println(par);
+  if(inputLocked)
+  {
+    if(cmd == '!' && par == 4242)
+    {
+      inputLocked = false;
+      Serial.println("input unlocked");
+    }
+    else
+    {
+      Serial.println("input locked, !4242 to unlock");
+    }
+    return;
+  }
   if( configCommand(cmd, par) ) 
   {
-    config.dump();
-    config.store();
-    res = true;
   }
-  else // if(!storeConfig) // there was not correct config update cmd
+  else if( normalCommand(cmd, par) )
   {
-    res = normalCommand(cmd, par);
   }
-  if(!res)
+  else
   {
-    Serial.println("Invalid command");
-    help();
+    Serial.println("command ignored, ? for help");
   }
-  return res;
 }
 
+// commands are simply: <char><number><CR>
+// the unlock command is !4242
 
 bool checkSerial()
 {
@@ -650,74 +657,120 @@ bool checkSerial()
     char cmd{};
     bool inPar{};
     int par{};
+    unsigned long startTime;
 
-    void reset() {
+    bool hasCmd() const { return cmd > 0; }
+
+    bool addChar(char c)
+    {
+      if(!hasCmd())
+      {
+        return start(c);
+      }
+      else // hasCmd()
+      {
+        return addPar(c); 
+      }
+      return false;
+    }
+
+    bool expired() const
+    {
+        return hasCmd() && millis() - startTime > 1000; // 1s for collection of all chars
+    }
+
+    void reset()
+    {
       cmd = 0;
       inPar = false;
+      par = 0;
+      startTime = 0;
+    }
+
+    private:
+
+    bool start(char c) 
+    {
+      if( c < 'a' && c > 'z' ) return false;
+      startTime = millis();
+      cmd = c;
       par = -1;
+      return true;
     }
-  } state{};
 
-  bool ret = false;
+    bool addPar(char c)
+    {
+      if( !isDigit(c) ) return false;
+      if( par < 0 ) par = 0;
+      par *= 10;
+      par += c - '0';
+      return true;
+    }
 
-  if( Serial.available() )
+  } state {};
+
+  if( !Serial.available() ) return false;
+
+  if( state.expired() )
   {
-    ret = true;
-    char ch = Serial.read();
-    if( ch == 13 ) // command terminated -> execute
-    {
-      executeCmd(state.cmd, state.par);
-      state.reset();
-    }
-    else if( ch <= ' ' )
-    {
-      // ignore
-    }
-    // have a command and got a digit?
-    else if( state.cmd > 0 && isDigit(ch) )
-    {
-      if( state.par < 0 ) state.par = 0;
-      state.inPar = true;
-      state.par *= 10;
-      state.par += ch - '0';
-    }
-    // collecting paramteter or got a digit at start?
-    else if( state.inPar || state.cmd == 0 && isDigit(ch) ) // got something else? scrap the whole thing
-    {
-      Serial.print("unexpected input: ");Serial.println(ch);
-      state.reset();
-    }
-    // use ch as command
-    else if( state.cmd == 0 )
-    {
-      state.cmd = ch;
-    }
-    else // got something else in command?
-    {
-      Serial.print("unexpected input: ");Serial.println(ch);
-      state.reset();
-    }
+    Serial.println("Resetting input");
+    state.reset();
   }
-  return ret;
+
+  const char TERMINATOR = 13;
+
+  // process commands from serial stream, if any
+  while( Serial.available() )
+  {
+    char ch = Serial.read();
+    if( ch == TERMINATOR ) 
+    {
+      if( state.hasCmd() ) // command terminated -> execute
+      {
+        executeCmd(state.cmd, state.par);
+        state.reset();
+      }
+      return false; // command terminated, let the state machines run
+    }
+    else if(!state.addChar(ch))
+    {
+      Serial.println("Ignoring input");
+      state.reset();
+      while( Serial.available() && Serial.read() != TERMINATOR ) delay(10);
+      return false; // input ignored, continue normal activity
+    }
+    // wait a bit, maybe more is comming?
+    delay(10);
+  }
+  // there were input chars processed if we were here, but not yet complete
+  return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 void setup()
-{  
-  // after turnon the ESP may spew its output for a while to the serial input so delay
-  delay(1000);  
+{ 
+  // configure pins
+  digitalWrite(BEEP_PIN, 0);
+  pinMode(BEEP_PIN, OUTPUT);
+  // we are here! 
+  beep(20);
+
   // begin the serial communication now
   Serial.begin(9600);
-  
+
+  // throw away the serial input if any for some time (serial monitor boot output)
+  int count = 100;
+  while(count-- > 0 && Serial.available())
+  {
+    while(Serial.available()) { Serial.read(); delay(10); }
+    beep(5);
+  }
+
   Serial.println();
   Serial.print("Pump controller (2 pump version) ");
   Serial.print("build: ");
   Serial.print(build_timestamp);
-
-  // configure pins
-  digitalWrite(BEEP_PIN, 0);
-  pinMode(BEEP_PIN, OUTPUT);
 
   // 5 x beep to signal starting
   for(auto n = 0; n < 5; ++n) {
@@ -725,8 +778,6 @@ void setup()
     delay(1000);
     Serial.print('.');
   }
-  // throw away the serial input if any for some time
-  while(Serial.available()) { Serial.read(); delay(1); }
   
   Serial.println();  
 
@@ -756,22 +807,23 @@ void setup()
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int stateUpdateTime = 0;
-
 void loop()
 {  
+  static int stateUpdateTime = 0;
   bool hadInput = checkSerial();
   if(!hadInput)
   {
-    sleep1s();
+    // no commands are comming over serial, sleep 1s to slow down state updates
+    sleep1sblink();
   }
 
-  chargingStateMachine.update();
-  pumpStateMachine.update();
+  bool change = false;
+  change |= chargingStateMachine.update();
+  change |= pumpStateMachine.update();
   
-  if( --stateUpdateTime <= 0 )
+  if( --stateUpdateTime <= 0 || change )
   {
-    outputState();
+    printAllState();
     stateUpdateTime = config.data().stateUpdateTime;
   }
 }
